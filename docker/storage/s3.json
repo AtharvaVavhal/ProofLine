@@ -1,0 +1,9 @@
+{
+  "identities": [
+    {
+      "name": "proofline-api",
+      "credentials": [{ "accessKey": "proofline-dev", "secretKey": "proofline-dev-secret" }],
+      "actions": ["Admin", "Read", "Write", "List", "Tagging"]
+    }
+  ]
+}

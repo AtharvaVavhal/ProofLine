@@ -12,7 +12,9 @@ This README covers only what is implemented so far.
 | P0 Repository bootstrap | Minimal: pnpm workspace, `apps/api` (NestJS), `packages/shared` placeholder, lint/format, Docker Compose (PostgreSQL), CI workflow. `apps/web` and the storage emulator are not created yet. |
 | P1 Database foundation  | Implemented: the full `docs/03` schema, initial migration, Prisma client module, health check.                                                                                               |
 | P2 Authentication       | Implemented: email-code sign-in (`POST /api/auth/request-code`, `/verify-code`, `/logout`), httpOnly session cookie, global session guard, Origin check, audit writer, rate limits.          |
-| P3+                     | Not started. There are no case, evidence, processing, AI, report or frontend features.                                                                                                       |
+| P3 Case management      | Implemented: `/api/cases` create, list (cursor), get, patch, delete, audit log; owner-scoped access; case state transitions.                                                                 |
+| P4 Evidence upload      | Implemented: register (signed PUT) → direct upload → `complete` (magic bytes, limits, SHA-256); pasted text/URL; list, signed download, removal; abandoned-upload cleanup.                   |
+| P5+                     | Not started. There is no processing, OCR, AI, graph, timeline, report or frontend.                                                                                                           |
 
 ## Layout
 
@@ -25,11 +27,14 @@ apps/api/                    NestJS API (+ worker in later phases)
   src/common/                error envelope, request ID + security headers, Origin check, validation
   src/auth/                  sign-in codes, sessions, AuthGuard, EmailTransport port (console in dev)
   src/users/ src/audit/      users table owner; same-transaction audit writer with metadata whitelist
+  src/cases/ src/provenance/ case lifecycle, ownership check, CASE_METADATA statements
+  src/evidence/ src/storage/ evidence upload flow; ObjectStorage port + S3 adapter
   src/health/                GET /api/health (SELECT 1, public)
   test/                      config, health, schema-inspection and constraint tests
 packages/shared/             shared zod schemas and types (empty until a phase defines them)
 docker/postgres/init/        creates the least-privilege application role on a fresh volume
-docker-compose.yml           local PostgreSQL 16
+docker/storage/s3.json      local storage credentials (development only)
+docker-compose.yml           local PostgreSQL 16 + SeaweedFS (S3-compatible)
 ```
 
 ## Requirements
@@ -41,8 +46,9 @@ docker-compose.yml           local PostgreSQL 16
 
 ```bash
 pnpm install
-docker compose up -d                      # PostgreSQL 16; creates proofline_dev and the app role
+docker compose up -d                      # PostgreSQL 16 + S3-compatible storage (SeaweedFS)
 cp apps/api/.env.example apps/api/.env
+pnpm storage:init                         # creates the private evidence bucket (CORS = WEB_ORIGIN)
 pnpm db:generate                          # Prisma client
 pnpm db:migrate                           # prisma migrate deploy (as the migration role)
 pnpm dev                                  # builds packages/shared, then the API in watch mode → http://localhost:3001/api/health

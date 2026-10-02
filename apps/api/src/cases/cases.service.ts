@@ -1,4 +1,4 @@
-import { Injectable } from '@nestjs/common';
+import { Inject, Injectable } from '@nestjs/common';
 import { IncidentTimePrecision, Prisma } from '@prisma/client';
 import type {
   AuditLogResponse,
@@ -12,6 +12,8 @@ import { ApiError } from '../common/api-error';
 import { cursorTimestampSql, decodeCursor, encodeCursor } from '../common/cursor';
 import { PrismaService } from '../database/prisma.service';
 import { ProvenanceService } from '../provenance/provenance.service';
+import { OBJECT_STORAGE, ObjectStorage } from '../storage/object-storage';
+import { removeObjectsAfterCommit } from '../storage/remove-objects';
 import { CaseAccessService } from './case-access.service';
 import { CaseReadModel } from './case-read-model';
 
@@ -114,6 +116,7 @@ export class CasesService {
     private readonly audit: AuditService,
     private readonly provenance: ProvenanceService,
     private readonly readModel: CaseReadModel,
+    @Inject(OBJECT_STORAGE) private readonly storage: ObjectStorage,
   ) {}
 
   async create(input: CreateCaseInput, actor: Actor): Promise<CaseResponse> {
@@ -206,17 +209,21 @@ export class CasesService {
 
   /**
    * Hard delete in one transaction (03 §24.1). Every case-owned row cascades; content-free audit
-   * rows and the CASE_DELETED tombstone remain. Stored objects are removed after commit once
-   * evidence storage exists (Phase 4).
+   * rows and the CASE_DELETED tombstone remain. Stored evidence objects are removed after
+   * commit (report and export objects join this list in Phases 13–14).
    */
   async delete(caseId: string, confirm: string | undefined, actor: Actor): Promise<void> {
     if (confirm !== 'true') {
       throw new ApiError(400, 'CONFIRMATION_REQUIRED', 'Confirm the deletion to continue.');
     }
-    await this.prisma.$transaction(async (tx) => {
+    const keys = await this.prisma.$transaction(async (tx) => {
       const owned = await this.access.assertCaseAccess(actor.userId, caseId, {
         db: tx,
         lock: true,
+      });
+      const objects = await tx.evidenceItem.findMany({
+        where: { caseId },
+        select: { storageKey: true },
       });
       await tx.case.delete({ where: { id: caseId } });
       await this.audit.record(tx, {
@@ -229,7 +236,9 @@ export class CasesService {
         requestId: actor.requestId,
         metadata: { statusFrom: owned.status },
       });
+      return objects.map((o) => o.storageKey);
     });
+    await removeObjectsAfterCommit(this.storage, keys);
   }
 
   /** Content-free case audit log, newest first (05 §22). */

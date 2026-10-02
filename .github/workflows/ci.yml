@@ -27,6 +27,11 @@ jobs:
       AUTH_SECRET: ci-only-secret-not-used-anywhere-else-0123456789
       WEB_ORIGIN: http://localhost:3000
       TRUST_PROXY: 1
+      STORAGE_BUCKET: proofline-evidence-test
+      STORAGE_ENDPOINT: http://localhost:8333
+      STORAGE_FORCE_PATH_STYLE: 'true'
+      STORAGE_ACCESS_KEY_ID: proofline-dev
+      STORAGE_SECRET_ACCESS_KEY: proofline-dev-secret
     steps:
       - uses: actions/checkout@v4
       - uses: pnpm/action-setup@v4
@@ -39,6 +44,13 @@ jobs:
         run: |
           psql "postgresql://proofline_owner:proofline_owner_dev@localhost:5432/proofline_test" -f docker/postgres/init/01-app-role.sql
           psql "postgresql://proofline_owner:proofline_owner_dev@localhost:5432/proofline_test" -c "CREATE DATABASE proofline_shadow"
+      - name: Start S3-compatible storage (SeaweedFS) and create the test bucket
+        run: |
+          docker run -d --name storage -p 8333:8333 \
+            -v "$PWD/docker/storage/s3.json:/etc/seaweedfs/s3.json:ro" chrislusf/seaweedfs:4.48 \
+            server -dir=/data -s3 -s3.port=8333 -s3.config=/etc/seaweedfs/s3.json -master.volumeSizeLimitMB=128
+          for i in $(seq 1 30); do curl -s -o /dev/null http://localhost:8333/ && break; sleep 1; done
+          pnpm --filter @proofline/api exec node scripts/storage-init.mjs
       - run: pnpm lint
       - run: pnpm format:check
       - run: pnpm db:generate

@@ -5,6 +5,9 @@ describe('loadConfig', () => {
     DATABASE_URL: 'postgresql://user:secret@localhost:5432/proofline',
     AUTH_SECRET: 'x'.repeat(48),
     WEB_ORIGIN: 'http://localhost:3000/',
+    STORAGE_BUCKET: 'proofline-evidence',
+    STORAGE_ACCESS_KEY_ID: 'key',
+    STORAGE_SECRET_ACCESS_KEY: 'storage-secret-hunter4',
   };
 
   it('applies defaults and normalises the web origin', () => {
@@ -16,10 +19,26 @@ describe('loadConfig', () => {
       webOrigin: 'http://localhost:3000',
       emailTransport: 'console',
       trustProxy: 0,
+      storage: {
+        driver: 's3',
+        bucket: 'proofline-evidence',
+        region: 'us-east-1',
+        endpoint: undefined,
+        forcePathStyle: false,
+        accessKeyId: 'key',
+        secretAccessKey: 'storage-secret-hunter4',
+      },
     });
   });
 
-  it.each(['DATABASE_URL', 'AUTH_SECRET', 'WEB_ORIGIN'])('fails fast when %s is missing', (key) => {
+  it.each([
+    'DATABASE_URL',
+    'AUTH_SECRET',
+    'WEB_ORIGIN',
+    'STORAGE_BUCKET',
+    'STORAGE_ACCESS_KEY_ID',
+    'STORAGE_SECRET_ACCESS_KEY',
+  ])('fails fast when %s is missing', (key) => {
     const env: Record<string, string> = { ...valid };
     delete env[key];
     expect(() => loadConfig(env)).toThrow(new RegExp(key));
@@ -45,7 +64,7 @@ describe('loadConfig', () => {
         DATABASE_URL: 'postgresql://u:pw-hunter3@',
       });
     } catch (error) {
-      expect(String(error)).not.toMatch(/hunter2|hunter3/);
+      expect(String(error)).not.toMatch(/hunter2|hunter3|hunter4/);
     }
   });
 });

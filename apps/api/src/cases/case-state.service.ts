@@ -84,4 +84,18 @@ export class CaseStateService {
       metadata: { statusFrom: params.from, statusTo: params.to },
     });
   }
+
+  /**
+   * After an evidence row is removed (deletion, rejection, abandonment): `NEW` if no evidence
+   * remains, otherwise `INGESTING` (03 §23.1). Returns the resulting status.
+   */
+  async settleAfterEvidenceRemoval(
+    db: Prisma.TransactionClient,
+    params: { caseId: string; from: CaseStatus; actorUserId?: string; requestId?: string },
+  ): Promise<CaseStatus> {
+    const remaining = await db.evidenceItem.count({ where: { caseId: params.caseId } });
+    const to: CaseStatus = remaining === 0 ? 'NEW' : 'INGESTING';
+    await this.transition(db, { ...params, to });
+    return to;
+  }
 }

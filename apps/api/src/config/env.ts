@@ -16,6 +16,15 @@ const envSchema = z
     EMAIL_TRANSPORT: z.enum(['console']).default('console'),
     /** Number of trusted reverse-proxy hops in front of the API (client fingerprinting). */
     TRUST_PROXY: z.coerce.number().int().min(0).max(5).default(0),
+    /** Private S3-compatible bucket for evidence (OD-14; vendor is an implementation choice). */
+    STORAGE_DRIVER: z.enum(['s3']).default('s3'),
+    STORAGE_BUCKET: z.string().min(3),
+    STORAGE_REGION: z.string().min(1).default('us-east-1'),
+    /** Omit for AWS S3; set for other S3-compatible services (e.g. the local SeaweedFS). */
+    STORAGE_ENDPOINT: z.string().url().optional(),
+    STORAGE_FORCE_PATH_STYLE: z.enum(['true', 'false']).default('false'),
+    STORAGE_ACCESS_KEY_ID: z.string().min(1),
+    STORAGE_SECRET_ACCESS_KEY: z.string().min(1),
   })
   .refine((env) => !(env.NODE_ENV === 'production' && env.EMAIL_TRANSPORT === 'console'), {
     path: ['EMAIL_TRANSPORT'],
@@ -30,6 +39,15 @@ export type AppConfig = {
   webOrigin: string;
   emailTransport: 'console';
   trustProxy: number;
+  storage: {
+    driver: 's3';
+    bucket: string;
+    region: string;
+    endpoint: string | undefined;
+    forcePathStyle: boolean;
+    accessKeyId: string;
+    secretAccessKey: string;
+  };
 };
 
 /**
@@ -53,5 +71,14 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): AppConfig {
     webOrigin: new URL(data.WEB_ORIGIN).origin,
     emailTransport: data.EMAIL_TRANSPORT,
     trustProxy: data.TRUST_PROXY,
+    storage: {
+      driver: data.STORAGE_DRIVER,
+      bucket: data.STORAGE_BUCKET,
+      region: data.STORAGE_REGION,
+      endpoint: data.STORAGE_ENDPOINT,
+      forcePathStyle: data.STORAGE_FORCE_PATH_STYLE === 'true',
+      accessKeyId: data.STORAGE_ACCESS_KEY_ID,
+      secretAccessKey: data.STORAGE_SECRET_ACCESS_KEY,
+    },
   };
 }

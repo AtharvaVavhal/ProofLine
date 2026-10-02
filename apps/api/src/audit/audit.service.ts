@@ -1,21 +1,39 @@
 import { Injectable } from '@nestjs/common';
 import type { Prisma } from '@prisma/client';
 
+/** The kinds of value audit metadata may hold. Free text is never allowed (03 §19.2). */
+const VALUE_RULES = {
+  code: (v: unknown) => typeof v === 'string' && /^[A-Z][A-Z0-9_]*$/.test(v),
+  sha256: (v: unknown) => typeof v === 'string' && /^[0-9a-f]{64}$/.test(v),
+  evidenceRef: (v: unknown) => typeof v === 'string' && /^E(0[1-9]|1[0-9]|20)$/.test(v),
+  boolean: (v: unknown) => typeof v === 'boolean',
+} as const;
+
+type ValueKind = keyof typeof VALUE_RULES;
+
 /**
- * Per-action metadata whitelist (03 §19.2, 04 §20). Later phases add their actions here.
- * Values are limited to enum codes, counts and booleans, so evidence content, emails, IPs,
- * codes and tokens can never be recorded.
+ * Per-action metadata whitelist (03 §19.2, 04 §20, 09 §28). Later phases add their actions here.
+ * Evidence content, filenames, labels, emails, IPs, codes and tokens can never be recorded.
  */
 const METADATA_WHITELIST = {
-  AUTH_CODE_REQUESTED: ['code'],
-  AUTH_SIGNED_IN: [],
-  AUTH_SIGN_IN_FAILED: ['code'],
-  AUTH_SIGNED_OUT: [],
-  CASE_CREATED: ['statusTo'],
-  CASE_UPDATED: ['incidentTimeChanged', 'summaryChanged', 'contactChanged', 'locationChanged'],
-  CASE_STATUS_CHANGED: ['statusFrom', 'statusTo'],
-  CASE_DELETED: ['statusFrom'],
-} as const satisfies Record<string, readonly string[]>;
+  AUTH_CODE_REQUESTED: { code: 'code' },
+  AUTH_SIGNED_IN: {},
+  AUTH_SIGN_IN_FAILED: { code: 'code' },
+  AUTH_SIGNED_OUT: {},
+  CASE_CREATED: { statusTo: 'code' },
+  CASE_UPDATED: {
+    incidentTimeChanged: 'boolean',
+    summaryChanged: 'boolean',
+    contactChanged: 'boolean',
+    locationChanged: 'boolean',
+  },
+  CASE_STATUS_CHANGED: { statusFrom: 'code', statusTo: 'code' },
+  CASE_DELETED: { statusFrom: 'code' },
+  EVIDENCE_UPLOADED: { evidenceRef: 'evidenceRef', sha256: 'sha256', code: 'code' },
+  EVIDENCE_REJECTED: { evidenceRef: 'evidenceRef', code: 'code' },
+  EVIDENCE_VIEWED: { evidenceRef: 'evidenceRef' },
+  EVIDENCE_DELETED: { evidenceRef: 'evidenceRef', sha256: 'sha256' },
+} as const satisfies Record<string, Record<string, ValueKind>>;
 
 export type AuditAction = keyof typeof METADATA_WHITELIST;
 
@@ -31,8 +49,6 @@ export type AuditEntry = {
   requestId?: string;
   metadata?: Record<string, MetadataValue>;
 };
-
-const ENUM_CODE = /^[A-Z][A-Z0-9_]*$/;
 
 export class AuditMetadataError extends Error {}
 
@@ -59,13 +75,14 @@ export class AuditService {
 }
 
 function assertWhitelisted(action: AuditAction, metadata: Record<string, MetadataValue>): void {
-  const allowed: readonly string[] = METADATA_WHITELIST[action];
+  const allowed: Record<string, ValueKind> = METADATA_WHITELIST[action];
   for (const [key, value] of Object.entries(metadata)) {
-    if (!allowed.includes(key)) {
+    const kind = allowed[key];
+    if (!kind) {
       throw new AuditMetadataError(`Audit metadata key not allowed for ${action}`);
     }
-    if (typeof value === 'string' && !ENUM_CODE.test(value)) {
-      throw new AuditMetadataError(`Audit metadata value for ${action} must be an enum code`);
+    if (!VALUE_RULES[kind](value)) {
+      throw new AuditMetadataError(`Audit metadata value for ${action} has the wrong form`);
     }
   }
 }

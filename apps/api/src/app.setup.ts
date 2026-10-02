@@ -1,4 +1,5 @@
 import type { NestApplicationOptions } from '@nestjs/common';
+import { json } from 'express';
 import type { NestExpressApplication } from '@nestjs/platform-express';
 import { HttpExceptionFilter } from './common/http-exception.filter';
 import { requestContext } from './common/request-context.middleware';
@@ -14,6 +15,8 @@ export function configureApp(app: NestExpressApplication): void {
   app.disable('x-powered-by');
   app.set('trust proxy', config.trustProxy);
   app.use(requestContext);
+  // Pasted evidence may be up to 20,000 characters (05 §3), larger than the 64 KB JSON default.
+  app.use('/api/cases/:id/evidence', json({ limit: '256kb' }));
   app.useBodyParser('json', { limit: '64kb' });
   app.useGlobalFilters(new HttpExceptionFilter());
   app.setGlobalPrefix('api');

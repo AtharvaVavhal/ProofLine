@@ -109,9 +109,20 @@ export async function signIn(
   return { email, cookie: sessionCookie(res), userId: res.body.user.id as string };
 }
 
-/** Removes the cases, users, sessions and challenges created by these tests (audit rows are append-only). */
+/**
+ * Removes the stored objects, cases, users, sessions and challenges created by these tests
+ * (audit rows are append-only).
+ */
 export async function cleanupAuthTestData(): Promise<void> {
   const like = { endsWith: `@${TEST_EMAIL_DOMAIN}` };
+  const objects = await prisma.evidenceItem.findMany({
+    where: { case: { owner: { email: like } } },
+    select: { storageKey: true },
+  });
+  if (objects.length > 0) {
+    const { adminStorage } = await import('./evidence-app');
+    await Promise.all(objects.map((o) => adminStorage.deleteObject(o.storageKey)));
+  }
   await prisma.case.deleteMany({ where: { owner: { email: like } } });
   await prisma.session.deleteMany({ where: { user: { email: like } } });
   await prisma.user.deleteMany({ where: { email: like } });

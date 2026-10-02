@@ -1,5 +1,4 @@
-# Local development stack (04 §30, OD-16). Phase 1 provides PostgreSQL only; the storage
-# emulator is added with evidence storage (Phase 4).
+# Local development stack (04 §30, OD-16): PostgreSQL and an S3-compatible object store.
 services:
   postgres:
     image: postgres:16
@@ -18,5 +17,20 @@ services:
       timeout: 3s
       retries: 10
 
+  # Private S3-compatible storage emulator (SeaweedFS). The vendor is an implementation choice
+  # (OD-14); the API only uses the ObjectStorage port. Anonymous access is denied because an
+  # identity is configured. Create buckets with `pnpm storage:init`.
+  storage:
+    image: chrislusf/seaweedfs:4.48
+    command: >-
+      server -dir=/data -s3 -s3.port=8333 -s3.config=/etc/seaweedfs/s3.json
+      -master.volumeSizeLimitMB=128
+    ports:
+      - '8333:8333'
+    volumes:
+      - storage-data:/data
+      - ./docker/storage/s3.json:/etc/seaweedfs/s3.json:ro
+
 volumes:
   postgres-data:
+  storage-data:
