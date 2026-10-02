@@ -1,0 +1,40 @@
+{
+  "name": "@proofline/api",
+  "version": "0.0.0",
+  "private": true,
+  "scripts": {
+    "build": "pnpm --filter @proofline/shared build && nest build",
+    "dev": "nest start --watch",
+    "start": "node dist/main.js",
+    "typecheck": "pnpm --filter @proofline/shared build && tsc --noEmit -p tsconfig.json",
+    "test": "pnpm --filter @proofline/shared build && jest --runInBand",
+    "db:generate": "prisma generate",
+    "db:migrate": "prisma migrate deploy",
+    "db:migrate:dev": "prisma migrate dev",
+    "db:status": "prisma migrate status",
+    "db:drift": "sh -c 'if [ -f .env ]; then set -a; . ./.env; set +a; fi; prisma migrate diff --from-migrations prisma/migrations --to-schema-datamodel prisma/schema.prisma --shadow-database-url \"$SHADOW_DATABASE_URL\" --exit-code'"
+  },
+  "dependencies": {
+    "@nestjs/common": "^11.2.7",
+    "@nestjs/core": "^11.2.7",
+    "@nestjs/platform-express": "^11.2.7",
+    "@prisma/client": "6.19.3",
+    "@proofline/shared": "workspace:*",
+    "reflect-metadata": "^0.2.2",
+    "rxjs": "^7.8.2",
+    "zod": "^4.6.5"
+  },
+  "devDependencies": {
+    "@nestjs/cli": "^11.0.24",
+    "@nestjs/testing": "^11.2.7",
+    "@types/express": "^5.0.6",
+    "@types/jest": "^30.0.0",
+    "@types/node": "^24.0.0",
+    "@types/supertest": "^6.0.3",
+    "jest": "^30.5.2",
+    "prisma": "6.19.3",
+    "supertest": "^7.3.0",
+    "ts-jest": "^29.4.14",
+    "typescript": "~5.9.3"
+  }
+}

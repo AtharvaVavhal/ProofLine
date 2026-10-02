@@ -1,0 +1,50 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  verify:
+    runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: postgres:16
+        env:
+          POSTGRES_DB: proofline_test
+          POSTGRES_USER: proofline_owner
+          POSTGRES_PASSWORD: proofline_owner_dev
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U proofline_owner -d proofline_test"
+          --health-interval 5s --health-timeout 3s --health-retries 10
+    env:
+      DATABASE_URL: postgresql://proofline_app_user:proofline_app_dev@localhost:5432/proofline_test
+      DATABASE_MIGRATION_URL: postgresql://proofline_owner:proofline_owner_dev@localhost:5432/proofline_test
+      SHADOW_DATABASE_URL: postgresql://proofline_owner:proofline_owner_dev@localhost:5432/proofline_shadow
+      AUTH_SECRET: ci-only-secret-not-used-anywhere-else-0123456789
+      WEB_ORIGIN: http://localhost:3000
+      TRUST_PROXY: 1
+    steps:
+      - uses: actions/checkout@v4
+      - uses: pnpm/action-setup@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+          cache: pnpm
+      - run: pnpm install --frozen-lockfile
+      - name: Create application role and shadow database
+        run: |
+          psql "postgresql://proofline_owner:proofline_owner_dev@localhost:5432/proofline_test" -f docker/postgres/init/01-app-role.sql
+          psql "postgresql://proofline_owner:proofline_owner_dev@localhost:5432/proofline_test" -c "CREATE DATABASE proofline_shadow"
+      - run: pnpm lint
+      - run: pnpm format:check
+      - run: pnpm db:generate
+      - run: pnpm typecheck
+      - run: pnpm db:migrate
+      - name: Schema drift check
+        run: pnpm --filter @proofline/api db:drift
+      - run: pnpm test
+      - run: pnpm build
