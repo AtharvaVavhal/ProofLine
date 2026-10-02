@@ -11,6 +11,10 @@ const METADATA_WHITELIST = {
   AUTH_SIGNED_IN: [],
   AUTH_SIGN_IN_FAILED: ['code'],
   AUTH_SIGNED_OUT: [],
+  CASE_CREATED: ['statusTo'],
+  CASE_UPDATED: ['incidentTimeChanged', 'summaryChanged', 'contactChanged', 'locationChanged'],
+  CASE_STATUS_CHANGED: ['statusFrom', 'statusTo'],
+  CASE_DELETED: ['statusFrom'],
 } as const satisfies Record<string, readonly string[]>;
 
 export type AuditAction = keyof typeof METADATA_WHITELIST;

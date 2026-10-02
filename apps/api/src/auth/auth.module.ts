@@ -9,7 +9,6 @@ import { AuthGuard } from './auth.guard';
 import { AuthService } from './auth.service';
 import { ConsoleEmailTransport } from './email/console-email.transport';
 import { EMAIL_TRANSPORT, EmailTransport } from './email/email-transport';
-import { RateLimiter } from './rate-limiter';
 import { SessionService } from './session.service';
 
 @Module({
@@ -18,7 +17,6 @@ import { SessionService } from './session.service';
   providers: [
     AuthService,
     SessionService,
-    RateLimiter,
     {
       provide: EMAIL_TRANSPORT,
       inject: [APP_CONFIG],

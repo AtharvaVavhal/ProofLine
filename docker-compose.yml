@@ -1,0 +1,22 @@
+# Local development stack (04 §30, OD-16). Phase 1 provides PostgreSQL only; the storage
+# emulator is added with evidence storage (Phase 4).
+services:
+  postgres:
+    image: postgres:16
+    environment:
+      POSTGRES_DB: proofline_dev
+      POSTGRES_USER: proofline_owner
+      POSTGRES_PASSWORD: proofline_owner_dev # local development only
+    ports:
+      - '5432:5432'
+    volumes:
+      - postgres-data:/var/lib/postgresql/data
+      - ./docker/postgres/init:/docker-entrypoint-initdb.d:ro
+    healthcheck:
+      test: ['CMD-SHELL', 'pg_isready -U proofline_owner -d proofline_dev']
+      interval: 5s
+      timeout: 3s
+      retries: 10
+
+volumes:
+  postgres-data:

@@ -1,0 +1,1374 @@
+// Proofline database schema — implements docs/03-DATABASE-SCHEMA.md (v1.1).
+//
+// Prisma cannot express every construct the specification requires. The following are
+// written as hand-authored SQL in prisma/migrations/*_init/migration.sql and are documented
+// next to the affected models below:
+//   - the `case_reference_seq` sequence (03 §5.1)
+//   - CHECK constraints (limits, hashes, "non-null iff" rules, urgency G2-v1, exclusive arcs)
+//   - partial unique / partial indexes (03 §21)
+//   - generated columns `evidence_items.evidence_ref` and `source_pages.has_usable_text_layer`
+//   - `UNIQUE NULLS NOT DISTINCT` on `fact_sources` (03 §11.2)
+//   - `ON DELETE SET NULL (column)` on composite case-scoped foreign keys (PostgreSQL 15+)
+//   - immutability triggers (03 §28.3) and the append-only `audit_logs` trigger (03 §19.4)
+//   - the views `entity_evidence_links` and `case_overview` (03 §5.3, §11.1)
+//   - the least-privilege application role grants (03 §20)
+//
+// Case isolation (03 §20): every case-owned table carries `case_id`, every parent exposes
+// `UNIQUE (id, case_id)`, and children reference parents through composite `(x_id, case_id)`
+// foreign keys so a row can never point at a parent in another case.
+//
+// Relations declared `onDelete: SetNull` on a composite key trigger a Prisma warning because
+// `case_id` is required. The migration narrows these to `SET NULL (x_id)`, which leaves
+// `case_id` untouched.
+
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider  = "postgresql"
+  url       = env("DATABASE_URL")
+  directUrl = env("DATABASE_MIGRATION_URL")
+}
+
+// ---------------------------------------------------------------------------------------------
+// Enums (03 §4.1). `upload_rejection_code` is audit/API only and has no column, so it is not a
+// database type.
+// ---------------------------------------------------------------------------------------------
+
+enum UserAuthStatus {
+  ACTIVE
+  DISABLED
+
+  @@map("user_auth_status")
+}
+
+// Declaration order matters: `case_overview` compares statuses with `<` (03 §14.4).
+enum CaseStatus {
+  NEW
+  INGESTING
+  EXTRACTED
+  ANALYZING
+  CORRELATED
+  TIMELINE_READY
+  ACTIONS_READY
+  REPORT_DRAFT
+  USER_REVIEW
+  EXPORTED
+
+  @@map("case_status")
+}
+
+enum IncidentTimePrecision {
+  EXACT
+  APPROXIMATE
+  UNKNOWN
+
+  @@map("incident_time_precision")
+}
+
+enum ScamLabel {
+  PHISHING
+  KYC_IMPERSONATION
+  FAKE_INVESTMENT
+  FAKE_JOB_OR_LOAN
+  UPI_FRAUD
+  ACCOUNT_TAKEOVER
+  DIGITAL_ARREST_IMPERSONATION
+  MARKETPLACE_FRAUD
+  UNKNOWN_OTHER
+
+  @@map("scam_label")
+}
+
+enum EvidenceType {
+  PNG
+  JPEG
+  PDF
+  TXT
+  EML
+  TEXT
+  URL
+
+  @@map("evidence_type")
+}
+
+enum PasteKind {
+  MESSAGE
+  CHAT_TRANSCRIPT
+  URL
+
+  @@map("paste_kind")
+}
+
+enum EvidenceProcessingStatus {
+  UPLOADING
+  UPLOADED
+  PROCESSING
+  PROCESSED
+  FAILED
+
+  @@map("evidence_processing_status")
+}
+
+enum EvidenceFailureCode {
+  TRANSFER_FAILED
+  FINGERPRINT_FAILED
+  STORAGE_UNAVAILABLE
+  NO_READABLE_TEXT
+  OCR_FAILED
+  PDF_NO_TEXT_LAYER
+  EMAIL_UNPARSEABLE
+  EMAIL_ENCRYPTED
+  EXTRACTION_FAILED
+
+  @@map("evidence_failure_code")
+}
+
+enum ParserKind {
+  IMAGE_OCR
+  PDF_TEXT_LAYER
+  PLAIN_TEXT
+  EMAIL_MIME
+  URL_STRING
+
+  @@map("parser_kind")
+}
+
+enum ParseStatus {
+  SUCCEEDED
+  FAILED
+
+  @@map("parse_status")
+}
+
+enum LineLocationKind {
+  TEXT_LINE
+  EMAIL_HEADER
+  EMAIL_BODY_LINE
+
+  @@map("line_location_kind")
+}
+
+enum SensitiveKind {
+  OTP
+  CARD_NUMBER
+
+  @@map("sensitive_kind")
+}
+
+enum EntityType {
+  PERSON
+  PHONE
+  EMAIL
+  URL
+  DOMAIN
+  UPI_ID
+  TRANSACTION
+  AMOUNT
+  BANK_OR_WALLET
+  ACCOUNT_HINT
+  SMS_SENDER_HEADER
+  MESSAGING_HANDLE
+  DATETIME
+
+  @@map("entity_type")
+}
+
+enum ExtractionMethod {
+  OCR
+  PDF_TEXT
+  TEXT_PARSE
+  RULE
+  LLM
+  USER
+
+  @@map("extraction_method")
+}
+
+enum ConfidenceBand {
+  HIGH
+  MEDIUM
+  LOW
+
+  @@map("confidence_band")
+}
+
+enum ConfidenceBasis {
+  SOURCE_VALIDATION
+  MODEL_JUDGEMENT
+
+  @@map("confidence_basis")
+}
+
+enum NormalizationStatus {
+  NORMALIZED
+  NOT_NORMALIZED
+  NOT_APPLICABLE
+
+  @@map("normalization_status")
+}
+
+enum CorrectionStatus {
+  UNMODIFIED
+  USER_CORRECTED
+
+  @@map("correction_status")
+}
+
+enum StatementKind {
+  CASE_METADATA
+  FOLLOW_UP_ANSWER
+  CORRECTION
+  ADDED_EVENT
+
+  @@map("statement_kind")
+}
+
+enum RelationType {
+  HOSTED_ON
+  SENT_LINK
+  REQUESTED_PAYMENT_TO
+  PAID_TO
+  AMOUNT_OF
+  DEBITED_FROM
+  MESSAGE_CONTAINED
+  CONTACTED_FROM
+
+  @@map("relation_type")
+}
+
+enum TimelineEventType {
+  MESSAGE_RECEIVED
+  MESSAGE_SENT
+  CALL
+  LINK_OPENED
+  CREDENTIAL_OTP_REQUEST
+  CREDENTIALS_OR_OTP_SHARED
+  PAYMENT_REQUESTED
+  PAYMENT_INITIATED
+  DEBIT_NOTIFICATION
+  OTHER
+
+  @@map("timeline_event_type")
+}
+
+enum TimestampPrecision {
+  EXACT
+  APPROXIMATE
+  INFERRED_ORDER_ONLY
+
+  @@map("timestamp_precision")
+}
+
+enum EventOrigin {
+  AI_GENERATED
+  USER_ADDED
+
+  @@map("event_origin")
+}
+
+enum RunKind {
+  ANALYSIS
+  REPORT_GENERATION
+
+  @@map("run_kind")
+}
+
+enum RunStatus {
+  QUEUED
+  RUNNING
+  SUCCEEDED
+  FAILED
+
+  @@map("run_status")
+}
+
+enum RunTrigger {
+  USER_START
+  USER_RETRY
+  ANSWER
+  CORRECTION
+  EVIDENCE_DELETION
+
+  @@map("run_trigger")
+}
+
+enum StepName {
+  PLAN
+  PARSE
+  EXTRACT
+  NORMALIZE
+  SCAM_ANALYSIS
+  CORRELATE
+  TIMELINE
+  MISSING_INFO
+  ACTIONS
+  URGENCY
+  REPORT
+
+  @@map("step_name")
+}
+
+enum StepStatus {
+  PENDING
+  RUNNING
+  SUCCEEDED
+  FAILED
+  SKIPPED
+
+  @@map("step_status")
+}
+
+enum FindingKind {
+  MISSING_FIELD
+  CONTRADICTION
+  MISSING_TIMESTAMP
+  MISSING_EVIDENCE
+
+  @@map("finding_kind")
+}
+
+enum ChecklistField {
+  INCIDENT_DATETIME
+  INCIDENT_DETAILS
+  IDENTITY_DOCUMENT
+  BANK_WALLET_MERCHANT
+  TRANSACTION_ID_UTR
+  TRANSACTION_DATE
+  FRAUD_AMOUNT
+  RELEVANT_EVIDENCE
+  SUSPECT_DETAILS
+
+  @@map("checklist_field")
+}
+
+enum ChecklistVariant {
+  FINANCIAL
+  ALL_INCIDENTS
+
+  @@map("checklist_variant")
+}
+
+enum FindingStatus {
+  OPEN
+  RESOLVED
+  INFORMATIONAL
+
+  @@map("finding_status")
+}
+
+enum FindingResolution {
+  USER_ANSWER
+  USER_CORRECTION
+  NEW_EVIDENCE
+  NO_LONGER_APPLICABLE
+
+  @@map("finding_resolution")
+}
+
+enum QuestionStatus {
+  NONE
+  OPEN
+  ANSWERED
+  SKIPPED
+
+  @@map("question_status")
+}
+
+enum ActionStatus {
+  TODO
+  DONE
+  NOT_APPLICABLE
+
+  @@map("action_status")
+}
+
+enum UrgencyLevel {
+  HIGH
+  MEDIUM
+  LOW
+
+  @@map("urgency_level")
+}
+
+enum UrgencySignal {
+  U1_FINANCIAL_LOSS
+  U2_CREDENTIAL_EXPOSURE
+
+  @@map("urgency_signal")
+}
+
+enum ReportStatus {
+  GENERATING
+  GENERATED
+  FAILED
+  INVALIDATED
+
+  @@map("report_status")
+}
+
+enum ReportInvalidationReason {
+  EVIDENCE_DELETED
+
+  @@map("report_invalidation_reason")
+}
+
+enum ConfirmationVoidReason {
+  CASE_CHANGED
+  REPORT_REGENERATED
+  EVIDENCE_DELETED
+
+  @@map("confirmation_void_reason")
+}
+
+enum ExportFormat {
+  REPORT_PDF
+  ZIP_BUNDLE
+
+  @@map("export_format")
+}
+
+enum ExportStatus {
+  GENERATING
+  READY
+  FAILED
+
+  @@map("export_status")
+}
+
+enum VerificationResult {
+  MATCH
+  MISMATCH
+  COULD_NOT_COMPLETE
+
+  @@map("verification_result")
+}
+
+enum VerificationFailureCode {
+  STORAGE_UNAVAILABLE
+  OBJECT_MISSING
+
+  @@map("verification_failure_code")
+}
+
+enum AttestationResult {
+  MATCH
+  MISMATCH
+  UNAVAILABLE
+
+  @@map("attestation_result")
+}
+
+enum FactRefKind {
+  EXTRACTION
+  EVIDENCE
+  USER_STATEMENT
+
+  @@map("fact_ref_kind")
+}
+
+enum AuditActorKind {
+  USER
+  SYSTEM
+
+  @@map("audit_actor_kind")
+}
+
+enum AuditOutcome {
+  SUCCEEDED
+  FAILED
+  DENIED
+
+  @@map("audit_outcome")
+}
+
+// ---------------------------------------------------------------------------------------------
+// Identity (03 §4.2–§4.4)
+// ---------------------------------------------------------------------------------------------
+
+/// 03 §4.2. CHECKs (SQL): email lower-cased, ≤ 254 chars; name ≤ 100 chars.
+model User {
+  id          String         @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  email       String         @unique
+  name        String?
+  authStatus  UserAuthStatus @default(ACTIVE) @map("auth_status")
+  lastLoginAt DateTime?      @map("last_login_at") @db.Timestamptz(6)
+  createdAt   DateTime       @default(now()) @map("created_at") @db.Timestamptz(6)
+  updatedAt   DateTime       @default(now()) @updatedAt @map("updated_at") @db.Timestamptz(6)
+
+  sessions               Session[]
+  cases                  Case[]
+  userStatements         UserStatement[]
+  analysisRunsCreated    AnalysisRun[]
+  actionStatusChanges    ActionItem[]
+  reportsRequested       Report[]
+  reviewConfirmations    ReviewConfirmation[]
+  exportsRequested       Export[]
+  integrityVerifications IntegrityVerification[]
+
+  @@map("users")
+}
+
+/// 03 §4.3. CHECKs (SQL): email lower-cased; expires_at > created_at;
+/// 0 ≤ attempt_count ≤ max_attempts; max_attempts > 0.
+model OtpChallenge {
+  id                   String    @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  email                String
+  codeHash             String    @map("code_hash")
+  expiresAt            DateTime  @map("expires_at") @db.Timestamptz(6)
+  attemptCount         Int       @default(0) @map("attempt_count") @db.SmallInt
+  maxAttempts          Int       @default(5) @map("max_attempts") @db.SmallInt
+  consumedAt           DateTime? @map("consumed_at") @db.Timestamptz(6)
+  requesterFingerprint String?   @map("requester_fingerprint")
+  createdAt            DateTime  @default(now()) @map("created_at") @db.Timestamptz(6)
+  updatedAt            DateTime  @default(now()) @updatedAt @map("updated_at") @db.Timestamptz(6)
+
+  @@index([email, createdAt(sort: Desc)])
+  @@index([requesterFingerprint])
+  @@index([expiresAt])
+  @@map("otp_challenges")
+}
+
+/// 03 §4.4. CHECK (SQL): expires_at > created_at.
+model Session {
+  id         String    @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  userId     String    @map("user_id") @db.Uuid
+  tokenHash  String    @unique @map("token_hash")
+  expiresAt  DateTime  @map("expires_at") @db.Timestamptz(6)
+  lastSeenAt DateTime? @map("last_seen_at") @db.Timestamptz(6)
+  revokedAt  DateTime? @map("revoked_at") @db.Timestamptz(6)
+  createdAt  DateTime  @default(now()) @map("created_at") @db.Timestamptz(6)
+  updatedAt  DateTime  @default(now()) @updatedAt @map("updated_at") @db.Timestamptz(6)
+
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@index([userId])
+  @@index([expiresAt])
+  @@map("sessions")
+}
+
+// ---------------------------------------------------------------------------------------------
+// Case (03 §5)
+// ---------------------------------------------------------------------------------------------
+
+/// 03 §5.1. `case_reference` defaults to 'CF-' || nextval('case_reference_seq') (sequence starts
+/// at 10001). CHECKs (SQL): reference format; incident-time precision pairing; text lengths;
+/// checklist_variant = FINANCIAL iff financial_loss_reported.
+model Case {
+  id                    String                 @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  userId                String                 @map("user_id") @db.Uuid
+  caseReference         String                 @unique @default(dbgenerated("('CF-'::text || nextval('case_reference_seq'::regclass))")) @map("case_reference")
+  status                CaseStatus             @default(NEW)
+  statusChangedAt       DateTime               @default(now()) @map("status_changed_at") @db.Timestamptz(6)
+  incidentTime          DateTime?              @map("incident_time") @db.Timestamptz(6)
+  incidentTimePrecision IncidentTimePrecision? @map("incident_time_precision")
+  contactText           String?                @map("contact_text")
+  locationText          String?                @map("location_text")
+  summary               String?
+  incidentType          ScamLabel?             @map("incident_type")
+  financialLossReported Boolean?               @map("financial_loss_reported")
+  checklistVariant      ChecklistVariant?      @map("checklist_variant")
+  createdAt             DateTime               @default(now()) @map("created_at") @db.Timestamptz(6)
+  updatedAt             DateTime               @default(now()) @updatedAt @map("updated_at") @db.Timestamptz(6)
+
+  owner User @relation(fields: [userId], references: [id], onDelete: Restrict)
+
+  evidenceItems           EvidenceItem[]
+  userStatements          UserStatement[]
+  entities                Entity[]
+  relationships           Relationship[]
+  timelineEvents          TimelineEvent[]
+  analysisRuns            AnalysisRun[]
+  scamSignals             ScamSignal[]
+  missingInformationItems MissingInformationItem[]
+  actionItems             ActionItem[]
+  urgencyAssessments      UrgencyAssessment[]
+  reports                 Report[]
+
+  @@unique([id, userId])
+  @@index([userId, updatedAt(sort: Desc)])
+  @@index([status])
+  @@map("cases")
+}
+
+// ---------------------------------------------------------------------------------------------
+// Evidence and parsing (03 §6–§9)
+// ---------------------------------------------------------------------------------------------
+
+/// 03 §6.1. `evidence_ref` is a generated column ('E' || lpad(sequence_no, 2, '0')).
+/// CHECKs (SQL): G-4 limits (sequence 1–20, 10 MB, 20 pages, 40 MP, 20,000 chars),
+/// paste-kind pairing, per-status "non-null iff" rules, sha256 hex, PDF_NO_TEXT_LAYER ⇒ not
+/// retryable. Trigger: sha256 / uploaded_at immutable once set. Partial index on UPLOADING rows.
+model EvidenceItem {
+  id                  String                   @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  caseId              String                   @map("case_id") @db.Uuid
+  sequenceNo          Int                      @map("sequence_no") @db.SmallInt
+  evidenceRef         String                   @default(dbgenerated("('E'::text || lpad((sequence_no)::text, 2, '0'::text))")) @map("evidence_ref")
+  evidenceType        EvidenceType             @map("evidence_type")
+  pasteKind           PasteKind?               @map("paste_kind")
+  label               String?
+  originalFilename    String?                  @map("original_filename")
+  declaredContentType String?                  @map("declared_content_type")
+  detectedContentType String?                  @map("detected_content_type")
+  byteSize            BigInt?                  @map("byte_size")
+  textCharCount       Int?                     @map("text_char_count")
+  pageCount           Int?                     @map("page_count") @db.SmallInt
+  imageWidth          Int?                     @map("image_width")
+  imageHeight         Int?                     @map("image_height")
+  storageKey          String                   @unique @map("storage_key")
+  sha256              String?                  @db.Char(64)
+  uploadedAt          DateTime?                @map("uploaded_at") @db.Timestamptz(6)
+  processingStatus    EvidenceProcessingStatus @default(UPLOADING) @map("processing_status")
+  failureCode         EvidenceFailureCode?     @map("failure_code")
+  failureRetryable    Boolean?                 @map("failure_retryable")
+  failureDetail       Json?                    @map("failure_detail")
+  sourceMetadata      Json                     @default("{}") @map("source_metadata")
+  attestationRef      Json?                    @map("attestation_ref")
+  createdAt           DateTime                 @default(now()) @map("created_at") @db.Timestamptz(6)
+  updatedAt           DateTime                 @default(now()) @updatedAt @map("updated_at") @db.Timestamptz(6)
+
+  case Case @relation(fields: [caseId], references: [id], onDelete: Cascade)
+
+  parseResults           ParseResult[] // at most one: parse_results.evidence_id is unique
+  sourceLines            SourceLine[]
+  sensitiveDetections    SensitiveDetection[]
+  extractions            Extraction[]
+  agentSteps             AgentStep[]
+  factSources            FactSource[]
+  exportEvidenceItems    ExportEvidenceItem[]
+  integrityVerifications IntegrityVerification[]
+
+  @@unique([id, caseId])
+  @@unique([caseId, sequenceNo])
+  @@index([caseId, evidenceType])
+  @@index([caseId, processingStatus])
+  @@index([caseId, sha256])
+  @@map("evidence_items")
+}
+
+/// 03 §7.1. One per evidence item (latest parse). There is no LLM parser kind (OD-03).
+/// CHECKs (SQL): page_count 1–20; failure_code iff FAILED.
+model ParseResult {
+  id            String               @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  caseId        String               @map("case_id") @db.Uuid
+  evidenceId    String               @unique @map("evidence_id") @db.Uuid
+  agentStepId   String?              @map("agent_step_id") @db.Uuid
+  parserKind    ParserKind           @map("parser_kind")
+  engine        String
+  engineVersion String               @map("engine_version")
+  status        ParseStatus
+  pageCount     Int                  @map("page_count") @db.SmallInt
+  failureCode   EvidenceFailureCode? @map("failure_code")
+  completedAt   DateTime             @default(now()) @map("completed_at") @db.Timestamptz(6)
+  createdAt     DateTime             @default(now()) @map("created_at") @db.Timestamptz(6)
+
+  evidence  EvidenceItem @relation(fields: [evidenceId, caseId], references: [id, caseId], onDelete: Cascade)
+  agentStep AgentStep?   @relation(fields: [agentStepId], references: [id], onDelete: SetNull)
+
+  pages       SourcePage[]
+  lines       SourceLine[]
+  extractions Extraction[]
+
+  @@unique([id, caseId])
+  @@map("parse_results")
+}
+
+/// 03 §7.2. `has_usable_text_layer` is a generated column: non_whitespace_char_count >= 10
+/// (OD-03). CHECKs (SQL): page_number 1–20; non_whitespace_char_count ≥ 0.
+model SourcePage {
+  parseResultId          String   @map("parse_result_id") @db.Uuid
+  caseId                 String   @map("case_id") @db.Uuid
+  pageNumber             Int      @map("page_number") @db.SmallInt
+  nonWhitespaceCharCount Int?     @map("non_whitespace_char_count")
+  hasUsableTextLayer     Boolean? @default(dbgenerated("(non_whitespace_char_count >= 10)")) @map("has_usable_text_layer")
+  width                  Int?
+  height                 Int?
+  createdAt              DateTime @default(now()) @map("created_at") @db.Timestamptz(6)
+
+  parseResult ParseResult @relation(fields: [parseResultId, caseId], references: [id, caseId], onDelete: Cascade)
+
+  lines SourceLine[]
+
+  @@id([parseResultId, pageNumber])
+  @@map("source_pages")
+}
+
+/// 03 §7.4. `text` is stored already redacted (OTP / card spans masked). CHECKs (SQL):
+/// line_number ≥ 1; header_name iff EMAIL_HEADER and from the allowed header list;
+/// ocr_confidence 0–1.
+model SourceLine {
+  id            String           @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  caseId        String           @map("case_id") @db.Uuid
+  parseResultId String           @map("parse_result_id") @db.Uuid
+  evidenceId    String           @map("evidence_id") @db.Uuid
+  pageNumber    Int              @map("page_number") @db.SmallInt
+  lineNumber    Int              @map("line_number")
+  locationKind  LineLocationKind @default(TEXT_LINE) @map("location_kind")
+  headerName    String?          @map("header_name")
+  text          String
+  bbox          Json?
+  ocrConfidence Decimal?         @map("ocr_confidence") @db.Decimal(4, 3)
+  createdAt     DateTime         @default(now()) @map("created_at") @db.Timestamptz(6)
+
+  parseResult ParseResult  @relation(fields: [parseResultId, caseId], references: [id, caseId], onDelete: Cascade)
+  evidence    EvidenceItem @relation(fields: [evidenceId, caseId], references: [id, caseId], onDelete: Cascade)
+  page        SourcePage   @relation(fields: [parseResultId, pageNumber], references: [parseResultId, pageNumber], onDelete: Cascade)
+
+  sensitiveDetections SensitiveDetection[]
+  extractionLinks     ExtractionSourceLine[]
+  factSources         FactSource[]
+
+  @@unique([id, caseId])
+  @@unique([parseResultId, pageNumber, lineNumber])
+  @@index([evidenceId])
+  @@map("source_lines")
+}
+
+/// 03 §9.6. Records where an OTP or card number was masked; there is no column for the value.
+/// CHECK (SQL): 0 ≤ char_start < char_end.
+model SensitiveDetection {
+  id              String        @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  caseId          String        @map("case_id") @db.Uuid
+  evidenceId      String        @map("evidence_id") @db.Uuid
+  sourceLineId    String        @map("source_line_id") @db.Uuid
+  kind            SensitiveKind
+  charStart       Int           @map("char_start")
+  charEnd         Int           @map("char_end")
+  detectorVersion String        @map("detector_version")
+  createdAt       DateTime      @default(now()) @map("created_at") @db.Timestamptz(6)
+
+  evidence   EvidenceItem @relation(fields: [evidenceId, caseId], references: [id, caseId], onDelete: Cascade)
+  sourceLine SourceLine   @relation(fields: [sourceLineId, caseId], references: [id, caseId], onDelete: Cascade)
+
+  @@index([evidenceId])
+  @@index([sourceLineId])
+  @@map("sensitive_detections")
+}
+
+/// 03 §9.2. `entity` uses ON DELETE SET NULL (entity_id) in SQL. CHECKs (SQL): method <> USER;
+/// identifier types ⇒ SOURCE_VALIDATION; confidence 0–1; normalisation and correction
+/// "non-null iff" rules; typed amount/datetime pairing; label and snippet lengths.
+model Extraction {
+  id                       String              @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  caseId                   String              @map("case_id") @db.Uuid
+  evidenceId               String              @map("evidence_id") @db.Uuid
+  parseResultId            String              @map("parse_result_id") @db.Uuid
+  agentStepId              String?             @map("agent_step_id") @db.Uuid
+  fieldType                EntityType          @map("field_type")
+  rawValue                 String              @map("raw_value")
+  normalizedValue          String?             @map("normalized_value")
+  normalizationStatus      NormalizationStatus @map("normalization_status")
+  valueAmountMinor         BigInt?             @map("value_amount_minor")
+  valueCurrency            String?             @map("value_currency") @db.Char(3)
+  valueDatetime            DateTime?           @map("value_datetime") @db.Timestamptz(6)
+  valueDatetimePrecision   TimestampPrecision? @map("value_datetime_precision")
+  sourceLabel              String?             @map("source_label")
+  attributes               Json                @default("{}")
+  method                   ExtractionMethod
+  confidence               Decimal             @db.Decimal(4, 3)
+  confidenceBasis          ConfidenceBasis     @map("confidence_basis")
+  confidenceBand           ConfidenceBand      @map("confidence_band")
+  snippet                  String
+  entityId                 String?             @map("entity_id") @db.Uuid
+  correctionStatus         CorrectionStatus    @default(UNMODIFIED) @map("correction_status")
+  correctedValue           String?             @map("corrected_value")
+  correctedNormalizedValue String?             @map("corrected_normalized_value")
+  correctionStatementId    String?             @map("correction_statement_id") @db.Uuid
+  correctedAt              DateTime?           @map("corrected_at") @db.Timestamptz(6)
+  createdAt                DateTime            @default(now()) @map("created_at") @db.Timestamptz(6)
+  updatedAt                DateTime            @default(now()) @updatedAt @map("updated_at") @db.Timestamptz(6)
+
+  evidence            EvidenceItem   @relation(fields: [evidenceId, caseId], references: [id, caseId], onDelete: Cascade)
+  parseResult         ParseResult    @relation(fields: [parseResultId, caseId], references: [id, caseId], onDelete: Cascade)
+  agentStep           AgentStep?     @relation(fields: [agentStepId], references: [id], onDelete: SetNull)
+  entity              Entity?        @relation(fields: [entityId, caseId], references: [id, caseId], onDelete: SetNull)
+  correctionStatement UserStatement? @relation(fields: [correctionStatementId, caseId], references: [id, caseId], onDelete: NoAction)
+
+  sourceLines ExtractionSourceLine[]
+  factSources FactSource[]
+
+  @@unique([id, caseId])
+  @@index([caseId, fieldType])
+  @@index([evidenceId])
+  @@index([parseResultId])
+  @@index([entityId])
+  @@map("extractions")
+}
+
+/// 03 §9.3. Relational form of provenance `location.lineIds[]`. CHECK (SQL): ordinal ≥ 1.
+model ExtractionSourceLine {
+  extractionId String   @map("extraction_id") @db.Uuid
+  sourceLineId String   @map("source_line_id") @db.Uuid
+  caseId       String   @map("case_id") @db.Uuid
+  ordinal      Int      @db.SmallInt
+  createdAt    DateTime @default(now()) @map("created_at") @db.Timestamptz(6)
+
+  extraction Extraction @relation(fields: [extractionId, caseId], references: [id, caseId], onDelete: Cascade)
+  sourceLine SourceLine @relation(fields: [sourceLineId, caseId], references: [id, caseId], onDelete: Cascade)
+
+  @@id([extractionId, sourceLineId])
+  @@index([sourceLineId])
+  @@map("extraction_source_lines")
+}
+
+/// 03 §9.5. Append-only user-provided facts used as provenance. CHECKs (SQL):
+/// value_text ≤ 2000 chars; value_amount_minor ≥ 0.
+model UserStatement {
+  id                    String        @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  caseId                String        @map("case_id") @db.Uuid
+  authorUserId          String        @map("author_user_id") @db.Uuid
+  statementKind         StatementKind @map("statement_kind")
+  subject               String
+  valueText             String        @map("value_text")
+  normalizedValue       String?       @map("normalized_value")
+  valueDatetime         DateTime?     @map("value_datetime") @db.Timestamptz(6)
+  valueAmountMinor      BigInt?       @map("value_amount_minor")
+  supersedesStatementId String?       @map("supersedes_statement_id") @db.Uuid
+  createdAt             DateTime      @default(now()) @map("created_at") @db.Timestamptz(6)
+
+  case       Case           @relation(fields: [caseId], references: [id], onDelete: Cascade)
+  author     User           @relation(fields: [authorUserId], references: [id], onDelete: NoAction)
+  supersedes UserStatement? @relation("StatementSupersedes", fields: [supersedesStatementId, caseId], references: [id, caseId], onDelete: NoAction)
+
+  supersededBy          UserStatement[]          @relation("StatementSupersedes")
+  extractionCorrections Extraction[]
+  timelineCorrections   TimelineEvent[]
+  missingInfoAnswers    MissingInformationItem[]
+  factSources           FactSource[]
+
+  @@unique([id, caseId])
+  @@index([caseId])
+  @@map("user_statements")
+}
+
+// ---------------------------------------------------------------------------------------------
+// Entities, relationships and provenance (03 §10–§11)
+// ---------------------------------------------------------------------------------------------
+
+/// 03 §10.1. CHECK (SQL): amount_minor / currency only on AMOUNT entities.
+model Entity {
+  id             String     @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  caseId         String     @map("case_id") @db.Uuid
+  entityType     EntityType @map("entity_type")
+  canonicalValue String     @map("canonical_value")
+  maskedValue    String     @map("masked_value")
+  amountMinor    BigInt?    @map("amount_minor")
+  currency       String?    @db.Char(3)
+  isUserStated   Boolean    @default(false) @map("is_user_stated")
+  createdAt      DateTime   @default(now()) @map("created_at") @db.Timestamptz(6)
+  updatedAt      DateTime   @default(now()) @updatedAt @map("updated_at") @db.Timestamptz(6)
+
+  case Case @relation(fields: [caseId], references: [id], onDelete: Cascade)
+
+  extractions       Extraction[]
+  relationshipsFrom Relationship[]           @relation("RelationshipFrom")
+  relationshipsTo   Relationship[]           @relation("RelationshipTo")
+  timelineEvents    TimelineEventEntity[]
+  missingInfoItems  MissingInformationItem[]
+  factSources       FactSource[]
+
+  @@unique([id, caseId])
+  @@unique([caseId, entityType, canonicalValue])
+  @@map("entities")
+}
+
+/// 03 §11.3. One edge per (case, from, type, to); extra support is extra fact_sources rows.
+/// CHECK (SQL): from_entity_id <> to_entity_id.
+model Relationship {
+  id           String       @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  caseId       String       @map("case_id") @db.Uuid
+  fromEntityId String       @map("from_entity_id") @db.Uuid
+  relationType RelationType @map("relation_type")
+  toEntityId   String       @map("to_entity_id") @db.Uuid
+  agentStepId  String?      @map("agent_step_id") @db.Uuid
+  createdAt    DateTime     @default(now()) @map("created_at") @db.Timestamptz(6)
+
+  case       Case       @relation(fields: [caseId], references: [id], onDelete: Cascade)
+  fromEntity Entity     @relation("RelationshipFrom", fields: [fromEntityId, caseId], references: [id, caseId], onDelete: Cascade)
+  toEntity   Entity     @relation("RelationshipTo", fields: [toEntityId, caseId], references: [id, caseId], onDelete: Cascade)
+  agentStep  AgentStep? @relation(fields: [agentStepId], references: [id], onDelete: SetNull)
+
+  factSources FactSource[]
+
+  @@unique([id, caseId])
+  @@unique([caseId, fromEntityId, relationType, toEntityId])
+  @@index([fromEntityId])
+  @@index([toEntityId])
+  @@map("relationships")
+}
+
+/// 03 §11.2. Uniform relational SourceRef with two exclusive arcs (owner, target). In SQL:
+/// num_nonnulls owner CHECK = 1; target columns paired with ref_kind; the unique key below is
+/// UNIQUE NULLS NOT DISTINCT; one partial index per nullable FK column. ordinal ≥ 1.
+model FactSource {
+  id                String      @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  caseId            String      @map("case_id") @db.Uuid
+  relationshipId    String?     @map("relationship_id") @db.Uuid
+  timelineEventId   String?     @map("timeline_event_id") @db.Uuid
+  scamSignalId      String?     @map("scam_signal_id") @db.Uuid
+  missingInfoItemId String?     @map("missing_info_item_id") @db.Uuid
+  actionItemId      String?     @map("action_item_id") @db.Uuid
+  urgencyReasonId   String?     @map("urgency_reason_id") @db.Uuid
+  entityId          String?     @map("entity_id") @db.Uuid
+  refKind           FactRefKind @map("ref_kind")
+  extractionId      String?     @map("extraction_id") @db.Uuid
+  evidenceId        String?     @map("evidence_id") @db.Uuid
+  sourceLineId      String?     @map("source_line_id") @db.Uuid
+  userStatementId   String?     @map("user_statement_id") @db.Uuid
+  ordinal           Int         @db.SmallInt
+  createdAt         DateTime    @default(now()) @map("created_at") @db.Timestamptz(6)
+
+  relationship    Relationship?           @relation(fields: [relationshipId, caseId], references: [id, caseId], onDelete: Cascade)
+  timelineEvent   TimelineEvent?          @relation(fields: [timelineEventId, caseId], references: [id, caseId], onDelete: Cascade)
+  scamSignal      ScamSignal?             @relation(fields: [scamSignalId, caseId], references: [id, caseId], onDelete: Cascade)
+  missingInfoItem MissingInformationItem? @relation(fields: [missingInfoItemId, caseId], references: [id, caseId], onDelete: Cascade)
+  actionItem      ActionItem?             @relation(fields: [actionItemId, caseId], references: [id, caseId], onDelete: Cascade)
+  urgencyReason   UrgencyReason?          @relation(fields: [urgencyReasonId, caseId], references: [id, caseId], onDelete: Cascade)
+  entity          Entity?                 @relation(fields: [entityId, caseId], references: [id, caseId], onDelete: Cascade)
+  extraction      Extraction?             @relation(fields: [extractionId, caseId], references: [id, caseId], onDelete: Cascade)
+  evidence        EvidenceItem?           @relation(fields: [evidenceId, caseId], references: [id, caseId], onDelete: Cascade)
+  sourceLine      SourceLine?             @relation(fields: [sourceLineId, caseId], references: [id, caseId], onDelete: Cascade)
+  userStatement   UserStatement?          @relation(fields: [userStatementId, caseId], references: [id, caseId], onDelete: Cascade)
+
+  @@unique([relationshipId, timelineEventId, scamSignalId, missingInfoItemId, actionItemId, urgencyReasonId, entityId, refKind, extractionId, evidenceId, sourceLineId, userStatementId], map: "fact_sources_link_key")
+  @@map("fact_sources")
+}
+
+// ---------------------------------------------------------------------------------------------
+// Timeline (03 §12)
+// ---------------------------------------------------------------------------------------------
+
+/// 03 §12.1. CHECKs (SQL): event_key iff AI_GENERATED; event_at null iff INFERRED_ORDER_ONLY;
+/// text lengths; confidence 0–1; original_* and correction_statement_id iff USER_CORRECTED.
+/// Trigger: original_* immutable after the first correction.
+model TimelineEvent {
+  id                         String              @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  caseId                     String              @map("case_id") @db.Uuid
+  eventKey                   String?             @map("event_key")
+  eventType                  TimelineEventType   @map("event_type")
+  eventAt                    DateTime?           @map("event_at") @db.Timestamptz(6)
+  timestampPrecision         TimestampPrecision  @map("timestamp_precision")
+  timeSourceText             String?             @map("time_source_text")
+  sortOrder                  Int                 @map("sort_order")
+  description                String
+  confidence                 Decimal             @db.Decimal(4, 3)
+  confidenceBand             ConfidenceBand      @map("confidence_band")
+  origin                     EventOrigin
+  correctionStatus           CorrectionStatus    @default(UNMODIFIED) @map("correction_status")
+  originalEventType          TimelineEventType?  @map("original_event_type")
+  originalEventAt            DateTime?           @map("original_event_at") @db.Timestamptz(6)
+  originalTimestampPrecision TimestampPrecision? @map("original_timestamp_precision")
+  originalDescription        String?             @map("original_description")
+  correctionStatementId      String?             @map("correction_statement_id") @db.Uuid
+  dismissedAt                DateTime?           @map("dismissed_at") @db.Timestamptz(6)
+  agentStepId                String?             @map("agent_step_id") @db.Uuid
+  createdAt                  DateTime            @default(now()) @map("created_at") @db.Timestamptz(6)
+  updatedAt                  DateTime            @default(now()) @updatedAt @map("updated_at") @db.Timestamptz(6)
+
+  case                Case           @relation(fields: [caseId], references: [id], onDelete: Cascade)
+  correctionStatement UserStatement? @relation(fields: [correctionStatementId, caseId], references: [id, caseId], onDelete: NoAction)
+  agentStep           AgentStep?     @relation(fields: [agentStepId], references: [id], onDelete: SetNull)
+
+  entities         TimelineEventEntity[]
+  missingInfoItems MissingInformationItem[]
+  factSources      FactSource[]
+
+  @@unique([id, caseId])
+  @@unique([caseId, eventKey])
+  @@index([caseId, sortOrder])
+  @@map("timeline_events")
+}
+
+/// 03 §12.2.
+model TimelineEventEntity {
+  timelineEventId String   @map("timeline_event_id") @db.Uuid
+  entityId        String   @map("entity_id") @db.Uuid
+  caseId          String   @map("case_id") @db.Uuid
+  createdAt       DateTime @default(now()) @map("created_at") @db.Timestamptz(6)
+
+  timelineEvent TimelineEvent @relation(fields: [timelineEventId, caseId], references: [id, caseId], onDelete: Cascade)
+  entity        Entity        @relation(fields: [entityId, caseId], references: [id, caseId], onDelete: Cascade)
+
+  @@id([timelineEventId, entityId])
+  @@index([entityId])
+  @@map("timeline_event_entities")
+}
+
+// ---------------------------------------------------------------------------------------------
+// Analysis runs, steps and scam signals (03 §15; columns per 14 §13 R-N2 and 06 §24, §31)
+// ---------------------------------------------------------------------------------------------
+
+/// Runs and steps. Partial unique (SQL): one QUEUED/RUNNING run per case (INV-Q1).
+model AnalysisRun {
+  id               String     @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  caseId           String     @map("case_id") @db.Uuid
+  kind             RunKind
+  trigger          RunTrigger
+  status           RunStatus  @default(QUEUED)
+  plan             Json?
+  fallbackUsed     Boolean    @default(false) @map("fallback_used")
+  failureCode      String?    @map("failure_code")
+  failureRetryable Boolean?   @map("failure_retryable")
+  failedStepId     String?    @map("failed_step_id") @db.Uuid
+  createdBy        String?    @map("created_by") @db.Uuid
+  startedAt        DateTime?  @map("started_at") @db.Timestamptz(6)
+  finishedAt       DateTime?  @map("finished_at") @db.Timestamptz(6)
+  createdAt        DateTime   @default(now()) @map("created_at") @db.Timestamptz(6)
+  updatedAt        DateTime   @default(now()) @updatedAt @map("updated_at") @db.Timestamptz(6)
+
+  case       Case       @relation(fields: [caseId], references: [id], onDelete: Cascade)
+  failedStep AgentStep? @relation("RunFailedStep", fields: [failedStepId], references: [id], onDelete: SetNull)
+  creator    User?      @relation(fields: [createdBy], references: [id], onDelete: NoAction)
+
+  steps              AgentStep[]         @relation("RunSteps")
+  urgencyAssessments UrgencyAssessment[]
+  reports            Report[]
+
+  @@unique([id, caseId])
+  @@index([caseId, createdAt(sort: Desc)])
+  @@map("analysis_runs")
+}
+
+/// `evidence` uses ON DELETE SET NULL (evidence_id) in SQL. Partial index (SQL):
+/// (case_id, step_name, evidence_id, input_hash) WHERE status = 'SUCCEEDED' (idempotency).
+model AgentStep {
+  id               String     @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  runId            String     @map("run_id") @db.Uuid
+  caseId           String     @map("case_id") @db.Uuid
+  stepName         StepName   @map("step_name")
+  evidenceId       String?    @map("evidence_id") @db.Uuid
+  sequenceNo       Int        @map("sequence_no")
+  status           StepStatus @default(PENDING)
+  inputHash        String?    @map("input_hash")
+  outputSummary    Json?      @map("output_summary")
+  failureCode      String?    @map("failure_code")
+  failureRetryable Boolean?   @map("failure_retryable")
+  fallbackUsed     Boolean    @default(false) @map("fallback_used")
+  provider         String?
+  model            String?
+  promptVersion    String?    @map("prompt_version")
+  latencyMs        Int?       @map("latency_ms")
+  tokensIn         Int?       @map("tokens_in")
+  tokensOut        Int?       @map("tokens_out")
+  retryCount       Int        @default(0) @map("retry_count") @db.SmallInt
+  startedAt        DateTime?  @map("started_at") @db.Timestamptz(6)
+  finishedAt       DateTime?  @map("finished_at") @db.Timestamptz(6)
+  createdAt        DateTime   @default(now()) @map("created_at") @db.Timestamptz(6)
+  updatedAt        DateTime   @default(now()) @updatedAt @map("updated_at") @db.Timestamptz(6)
+
+  run      AnalysisRun   @relation("RunSteps", fields: [runId, caseId], references: [id, caseId], onDelete: Cascade)
+  evidence EvidenceItem? @relation(fields: [evidenceId, caseId], references: [id, caseId], onDelete: SetNull)
+
+  failedRuns     AnalysisRun[]   @relation("RunFailedStep")
+  parseResults   ParseResult[]
+  extractions    Extraction[]
+  relationships  Relationship[]
+  timelineEvents TimelineEvent[]
+  scamSignals    ScamSignal[]
+  actionItems    ActionItem[]
+
+  @@unique([id, caseId])
+  @@index([runId, sequenceNo])
+  @@index([evidenceId])
+  @@map("agent_steps")
+}
+
+/// 03 §15.2. Partial unique (SQL): one primary per case. CHECKs (SQL): confidence 0–1;
+/// explanation ≤ 600 chars.
+model ScamSignal {
+  id             String         @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  caseId         String         @map("case_id") @db.Uuid
+  agentStepId    String         @map("agent_step_id") @db.Uuid
+  label          ScamLabel
+  isPrimary      Boolean        @map("is_primary")
+  confidence     Decimal        @db.Decimal(4, 3)
+  confidenceBand ConfidenceBand @map("confidence_band")
+  explanation    String
+  createdAt      DateTime       @default(now()) @map("created_at") @db.Timestamptz(6)
+
+  case      Case      @relation(fields: [caseId], references: [id], onDelete: Cascade)
+  agentStep AgentStep @relation(fields: [agentStepId], references: [id], onDelete: Cascade)
+
+  factSources FactSource[]
+
+  @@unique([id, caseId])
+  @@unique([caseId, label])
+  @@index([agentStepId])
+  @@map("scam_signals")
+}
+
+// ---------------------------------------------------------------------------------------------
+// Missing information, actions and urgency (03 §13, §14, §16)
+// ---------------------------------------------------------------------------------------------
+
+/// 03 §13.1. CHECKs (SQL): checklist_field required for MISSING_FIELD; questions only on
+/// high-value findings; identity document INFORMATIONAL with no question; resolution iff
+/// RESOLVED; question_text iff question; answer_statement_id iff ANSWERED.
+model MissingInformationItem {
+  id                     String             @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  caseId                 String             @map("case_id") @db.Uuid
+  findingKey             String             @map("finding_key")
+  findingKind            FindingKind        @map("finding_kind")
+  checklistField         ChecklistField?    @map("checklist_field")
+  checklistVariant       ChecklistVariant   @map("checklist_variant")
+  subjectEntityId        String?            @map("subject_entity_id") @db.Uuid
+  subjectTimelineEventId String?            @map("subject_timeline_event_id") @db.Uuid
+  reasonText             String             @map("reason_text")
+  isHighValue            Boolean            @map("is_high_value")
+  status                 FindingStatus      @default(OPEN)
+  resolution             FindingResolution?
+  questionText           String?            @map("question_text")
+  questionStatus         QuestionStatus     @default(NONE) @map("question_status")
+  answerStatementId      String?            @map("answer_statement_id") @db.Uuid
+  resolvedAt             DateTime?          @map("resolved_at") @db.Timestamptz(6)
+  createdAt              DateTime           @default(now()) @map("created_at") @db.Timestamptz(6)
+  updatedAt              DateTime           @default(now()) @updatedAt @map("updated_at") @db.Timestamptz(6)
+
+  case                 Case           @relation(fields: [caseId], references: [id], onDelete: Cascade)
+  subjectEntity        Entity?        @relation(fields: [subjectEntityId, caseId], references: [id, caseId], onDelete: Cascade)
+  subjectTimelineEvent TimelineEvent? @relation(fields: [subjectTimelineEventId, caseId], references: [id, caseId], onDelete: Cascade)
+  answerStatement      UserStatement? @relation(fields: [answerStatementId, caseId], references: [id, caseId], onDelete: NoAction)
+
+  factSources FactSource[]
+
+  @@unique([id, caseId])
+  @@unique([caseId, findingKey])
+  @@index([subjectEntityId])
+  @@index([subjectTimelineEventId])
+  @@map("missing_information_items")
+}
+
+/// 03 §16.1. Channel codes only, never numbers or URLs (GR-14). CHECK (SQL): priority_rank ≥ 1.
+model ActionItem {
+  id                  String       @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  caseId              String       @map("case_id") @db.Uuid
+  actionCode          String       @map("action_code")
+  actionText          String       @map("action_text")
+  reasonText          String       @map("reason_text")
+  priorityRank        Int          @map("priority_rank") @db.SmallInt
+  officialChannelCode String?      @map("official_channel_code")
+  status              ActionStatus @default(TODO)
+  statusChangedBy     String?      @map("status_changed_by") @db.Uuid
+  statusChangedAt     DateTime?    @map("status_changed_at") @db.Timestamptz(6)
+  agentStepId         String?      @map("agent_step_id") @db.Uuid
+  createdAt           DateTime     @default(now()) @map("created_at") @db.Timestamptz(6)
+  updatedAt           DateTime     @default(now()) @updatedAt @map("updated_at") @db.Timestamptz(6)
+
+  case          Case       @relation(fields: [caseId], references: [id], onDelete: Cascade)
+  statusChanger User?      @relation(fields: [statusChangedBy], references: [id], onDelete: NoAction)
+  agentStep     AgentStep? @relation(fields: [agentStepId], references: [id], onDelete: SetNull)
+
+  factSources FactSource[]
+
+  @@unique([id, caseId])
+  @@unique([caseId, actionCode])
+  @@map("action_items")
+}
+
+/// 03 §14.1. Never AI-generated; no confidence column. CHECK (SQL): the G2-v1 rule relating
+/// level to signals. Partial unique (SQL): one current assessment per case.
+model UrgencyAssessment {
+  id                         String       @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  caseId                     String       @map("case_id") @db.Uuid
+  ruleVersion                String       @map("rule_version")
+  level                      UrgencyLevel
+  signalU1FinancialLoss      Boolean      @map("signal_u1_financial_loss")
+  signalU2CredentialExposure Boolean      @map("signal_u2_credential_exposure")
+  explanationText            String       @map("explanation_text")
+  disclaimerText             String       @map("disclaimer_text")
+  templateParams             Json         @map("template_params")
+  analysisRunId              String?      @map("analysis_run_id") @db.Uuid
+  computedAt                 DateTime     @default(now()) @map("computed_at") @db.Timestamptz(6)
+  isCurrent                  Boolean      @default(true) @map("is_current")
+  createdAt                  DateTime     @default(now()) @map("created_at") @db.Timestamptz(6)
+  updatedAt                  DateTime     @default(now()) @updatedAt @map("updated_at") @db.Timestamptz(6)
+
+  case        Case         @relation(fields: [caseId], references: [id], onDelete: Cascade)
+  analysisRun AnalysisRun? @relation(fields: [analysisRunId], references: [id], onDelete: SetNull)
+
+  reasons UrgencyReason[]
+
+  @@unique([id, caseId])
+  @@index([caseId, computedAt(sort: Desc)])
+  @@map("urgency_assessments")
+}
+
+/// 03 §14.2.
+model UrgencyReason {
+  id           String        @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  caseId       String        @map("case_id") @db.Uuid
+  assessmentId String        @map("assessment_id") @db.Uuid
+  signal       UrgencySignal
+  ordinal      Int           @db.SmallInt
+  sentenceText String        @map("sentence_text")
+  createdAt    DateTime      @default(now()) @map("created_at") @db.Timestamptz(6)
+
+  assessment UrgencyAssessment @relation(fields: [assessmentId, caseId], references: [id, caseId], onDelete: Cascade)
+
+  factSources FactSource[]
+
+  @@unique([id, caseId])
+  @@unique([assessmentId, ordinal])
+  @@map("urgency_reasons")
+}
+
+// ---------------------------------------------------------------------------------------------
+// Reports, review, export (03 §17)
+// ---------------------------------------------------------------------------------------------
+
+/// 03 §17.1. One row per version. CHECKs (SQL): version ≥ 1; content / checksums / PDF key iff
+/// GENERATED; INVALIDATED ⇒ no content or file; failure / invalidation fields iff status.
+model Report {
+  id                 String                    @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  caseId             String                    @map("case_id") @db.Uuid
+  versionNumber      Int                       @map("version_number")
+  status             ReportStatus              @default(GENERATING)
+  schemaVersion      String                    @map("schema_version")
+  content            Json?
+  contentSha256      String?                   @map("content_sha256") @db.Char(64)
+  pdfStorageKey      String?                   @unique @map("pdf_storage_key")
+  pdfSha256          String?                   @map("pdf_sha256") @db.Char(64)
+  analysisRunId      String?                   @map("analysis_run_id") @db.Uuid
+  requestedBy        String                    @map("requested_by") @db.Uuid
+  generatedAt        DateTime?                 @map("generated_at") @db.Timestamptz(6)
+  failureCode        String?                   @map("failure_code")
+  invalidatedAt      DateTime?                 @map("invalidated_at") @db.Timestamptz(6)
+  invalidationReason ReportInvalidationReason? @map("invalidation_reason")
+  createdAt          DateTime                  @default(now()) @map("created_at") @db.Timestamptz(6)
+  updatedAt          DateTime                  @default(now()) @updatedAt @map("updated_at") @db.Timestamptz(6)
+
+  case        Case         @relation(fields: [caseId], references: [id], onDelete: Cascade)
+  analysisRun AnalysisRun? @relation(fields: [analysisRunId], references: [id], onDelete: SetNull)
+  requester   User         @relation(fields: [requestedBy], references: [id], onDelete: NoAction)
+
+  reviewConfirmations ReviewConfirmation[]
+  exports             Export[]
+
+  @@unique([id, caseId])
+  @@unique([caseId, versionNumber])
+  @@index([caseId, status])
+  @@map("reports")
+}
+
+/// 03 §17.3 (R-1). Confirming never changes cases.status. Partial unique (SQL): at most one
+/// active (un-voided) confirmation per report version. CHECKs (SQL): hex checksum; void_reason
+/// iff voided_at.
+model ReviewConfirmation {
+  id                  String                  @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  caseId              String                  @map("case_id") @db.Uuid
+  reportId            String                  @map("report_id") @db.Uuid
+  reportContentSha256 String                  @map("report_content_sha256") @db.Char(64)
+  confirmedBy         String                  @map("confirmed_by") @db.Uuid
+  confirmedAt         DateTime                @default(now()) @map("confirmed_at") @db.Timestamptz(6)
+  voidedAt            DateTime?               @map("voided_at") @db.Timestamptz(6)
+  voidReason          ConfirmationVoidReason? @map("void_reason")
+  createdAt           DateTime                @default(now()) @map("created_at") @db.Timestamptz(6)
+  updatedAt           DateTime                @default(now()) @updatedAt @map("updated_at") @db.Timestamptz(6)
+
+  report    Report @relation(fields: [reportId, caseId], references: [id, caseId], onDelete: Cascade)
+  confirmer User   @relation(fields: [confirmedBy], references: [id], onDelete: NoAction)
+
+  exports Export[]
+
+  @@unique([id, reportId])
+  @@index([reportId])
+  @@map("review_confirmations")
+}
+
+/// 03 §17.4. The composite FK to review_confirmations(id, report_id) guarantees an export
+/// points to a confirmation of the same report version. CHECKs (SQL): storage_key and sha256
+/// iff READY; hex sha256.
+model Export {
+  id                   String       @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  caseId               String       @map("case_id") @db.Uuid
+  reportId             String       @map("report_id") @db.Uuid
+  reviewConfirmationId String       @map("review_confirmation_id") @db.Uuid
+  format               ExportFormat
+  status               ExportStatus @default(GENERATING)
+  storageKey           String?      @unique @map("storage_key")
+  sha256               String?      @db.Char(64)
+  byteSize             BigInt?      @map("byte_size")
+  requestedBy          String       @map("requested_by") @db.Uuid
+  completedAt          DateTime?    @map("completed_at") @db.Timestamptz(6)
+  failureCode          String?      @map("failure_code")
+  createdAt            DateTime     @default(now()) @map("created_at") @db.Timestamptz(6)
+  updatedAt            DateTime     @default(now()) @updatedAt @map("updated_at") @db.Timestamptz(6)
+
+  report             Report             @relation(fields: [reportId, caseId], references: [id, caseId], onDelete: Cascade)
+  reviewConfirmation ReviewConfirmation @relation(fields: [reviewConfirmationId, reportId], references: [id, reportId], onDelete: NoAction)
+  requester          User               @relation(fields: [requestedBy], references: [id], onDelete: NoAction)
+
+  evidenceItems ExportEvidenceItem[]
+
+  @@unique([id, caseId])
+  @@index([caseId, createdAt(sort: Desc)])
+  @@index([reportId])
+  @@map("exports")
+}
+
+/// 03 §17.4. Originals selected for a ZIP bundle.
+model ExportEvidenceItem {
+  exportId   String   @map("export_id") @db.Uuid
+  evidenceId String   @map("evidence_id") @db.Uuid
+  caseId     String   @map("case_id") @db.Uuid
+  createdAt  DateTime @default(now()) @map("created_at") @db.Timestamptz(6)
+
+  export   Export       @relation(fields: [exportId, caseId], references: [id, caseId], onDelete: Cascade)
+  evidence EvidenceItem @relation(fields: [evidenceId, caseId], references: [id, caseId], onDelete: Cascade)
+
+  @@id([exportId, evidenceId])
+  @@index([evidenceId])
+  @@map("export_evidence_items")
+}
+
+// ---------------------------------------------------------------------------------------------
+// Integrity and audit (03 §18–§19)
+// ---------------------------------------------------------------------------------------------
+
+/// 03 §18.1. Immutable results. CHECKs (SQL): hex hashes; MATCH ⇔ computed = recorded;
+/// MISMATCH ⇔ computed ≠ recorded; COULD_NOT_COMPLETE ⇔ computed IS NULL; failure_code iff
+/// COULD_NOT_COMPLETE.
+model IntegrityVerification {
+  id                String                   @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  caseId            String                   @map("case_id") @db.Uuid
+  evidenceId        String                   @map("evidence_id") @db.Uuid
+  requestedBy       String                   @map("requested_by") @db.Uuid
+  recordedSha256    String                   @map("recorded_sha256") @db.Char(64)
+  computedSha256    String?                  @map("computed_sha256") @db.Char(64)
+  result            VerificationResult
+  failureCode       VerificationFailureCode? @map("failure_code")
+  attestationResult AttestationResult?       @map("attestation_result")
+  verifiedAt        DateTime                 @default(now()) @map("verified_at") @db.Timestamptz(6)
+  createdAt         DateTime                 @default(now()) @map("created_at") @db.Timestamptz(6)
+
+  evidence  EvidenceItem @relation(fields: [evidenceId, caseId], references: [id, caseId], onDelete: Cascade)
+  requester User         @relation(fields: [requestedBy], references: [id], onDelete: NoAction)
+
+  @@index([evidenceId, verifiedAt(sort: Desc)])
+  @@map("integrity_verifications")
+}
+
+/// 03 §19. No foreign keys (survives case deletion). Append-only: the application role has
+/// INSERT/SELECT only, and a trigger rejects UPDATE, DELETE and TRUNCATE. CHECKs (SQL):
+/// actor_user_id iff USER; action from the 03 §19.3 vocabulary.
+model AuditLog {
+  id          String         @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  occurredAt  DateTime       @default(now()) @map("occurred_at") @db.Timestamptz(6)
+  caseId      String?        @map("case_id") @db.Uuid
+  actorKind   AuditActorKind @map("actor_kind")
+  actorUserId String?        @map("actor_user_id") @db.Uuid
+  action      String
+  targetType  String?        @map("target_type")
+  targetId    String?        @map("target_id") @db.Uuid
+  outcome     AuditOutcome
+  requestId   String?        @map("request_id")
+  metadata    Json           @default("{}")
+  createdAt   DateTime       @default(now()) @map("created_at") @db.Timestamptz(6)
+
+  @@index([occurredAt])
+  @@index([caseId, occurredAt(sort: Desc)])
+  @@index([actorUserId, occurredAt(sort: Desc)])
+  @@index([requestId])
+  @@map("audit_logs")
+}

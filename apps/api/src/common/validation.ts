@@ -1,8 +1,8 @@
 import type { z } from 'zod';
 import { ApiError, FieldError } from './api-error';
 
-/** Parses a request body with a shared zod schema; unknown fields are rejected (05 §28). */
-export function parseBody<S extends z.ZodType>(schema: S, body: unknown): z.output<S> {
+/** Parses a request body or query with a shared zod schema; unknown fields are rejected (05 §28). */
+export function parseInput<S extends z.ZodType>(schema: S, body: unknown): z.output<S> {
   const result = schema.safeParse(body ?? {});
   if (result.success) return result.data;
   const fieldErrors: FieldError[] = result.error.issues.flatMap((issue) =>

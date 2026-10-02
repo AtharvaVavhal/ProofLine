@@ -9,7 +9,7 @@ import { UsersService } from '../users/users.service';
 import { AUTH_LIMITS } from './auth.constants';
 import { generateSignInCode, hashesEqual, hmac } from './auth.crypto';
 import { EMAIL_TRANSPORT, EmailTransport } from './email/email-transport';
-import { RateLimiter } from './rate-limiter';
+import { RateLimiter } from '../common/rate-limiter';
 import { SessionService } from './session.service';
 
 export const REQUEST_CODE_MESSAGE =

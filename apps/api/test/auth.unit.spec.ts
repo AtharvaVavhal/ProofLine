@@ -7,7 +7,7 @@ import {
   hashesEqual,
   hmac,
 } from '../src/auth/auth.crypto';
-import { RateLimiter } from '../src/auth/rate-limiter';
+import { RateLimiter } from '../src/common/rate-limiter';
 import { readSessionCookie } from '../src/auth/session-cookie';
 import { requestCodeSchema, verifyCodeSchema } from '@proofline/shared';
 

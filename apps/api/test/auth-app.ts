@@ -55,7 +55,8 @@ export async function createTestApp(
     .compile();
   const app = moduleRef.createNestApplication<NestExpressApplication>(APP_OPTIONS);
   configureApp(app);
-  await app.init();
+  // Bound once, so concurrent supertest requests share one listener instead of adding one each.
+  await app.listen(0, '127.0.0.1');
   return { app, mail, http: () => request(app.getHttpServer()) };
 }
 
@@ -108,9 +109,10 @@ export async function signIn(
   return { email, cookie: sessionCookie(res), userId: res.body.user.id as string };
 }
 
-/** Removes the users, sessions and challenges created by auth tests (audit rows are append-only). */
+/** Removes the cases, users, sessions and challenges created by these tests (audit rows are append-only). */
 export async function cleanupAuthTestData(): Promise<void> {
   const like = { endsWith: `@${TEST_EMAIL_DOMAIN}` };
+  await prisma.case.deleteMany({ where: { owner: { email: like } } });
   await prisma.session.deleteMany({ where: { user: { email: like } } });
   await prisma.user.deleteMany({ where: { email: like } });
   await prisma.otpChallenge.deleteMany({ where: { email: like } });

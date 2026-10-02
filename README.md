@@ -45,7 +45,7 @@ docker compose up -d                      # PostgreSQL 16; creates proofline_dev
 cp apps/api/.env.example apps/api/.env
 pnpm db:generate                          # Prisma client
 pnpm db:migrate                           # prisma migrate deploy (as the migration role)
-pnpm --filter @proofline/api dev          # http://localhost:3001/api/health
+pnpm dev                                  # builds packages/shared, then the API in watch mode → http://localhost:3001/api/health
 ```
 
 When using an existing PostgreSQL server instead of Docker, run

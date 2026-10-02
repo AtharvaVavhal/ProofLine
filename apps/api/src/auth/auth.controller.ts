@@ -8,7 +8,7 @@ import {
 import type { Response } from 'express';
 import type { AppRequest, AuthenticatedUser } from '../common/app-request';
 import { Public } from '../common/public.decorator';
-import { parseBody } from '../common/validation';
+import { parseInput } from '../common/validation';
 import { AuthService, REQUEST_CODE_MESSAGE } from './auth.service';
 import { CurrentUser } from './current-user.decorator';
 import { clearSessionCookie, setSessionCookie } from './session-cookie';
@@ -22,7 +22,7 @@ export class AuthController {
   @Post('request-code')
   @HttpCode(202)
   async requestCode(@Body() body: unknown, @Req() req: AppRequest): Promise<RequestCodeResponse> {
-    const { email } = parseBody(requestCodeSchema, body);
+    const { email } = parseInput(requestCodeSchema, body);
     await this.auth.requestCode(email, { ip: req.ip ?? '', requestId: req.requestId });
     return { message: REQUEST_CODE_MESSAGE };
   }
@@ -35,7 +35,7 @@ export class AuthController {
     @Req() req: AppRequest,
     @Res({ passthrough: true }) res: Response,
   ): Promise<VerifyCodeResponse> {
-    const { email, code } = parseBody(verifyCodeSchema, body);
+    const { email, code } = parseInput(verifyCodeSchema, body);
     const result = await this.auth.verifyCode(email, code, {
       ip: req.ip ?? '',
       requestId: req.requestId,
