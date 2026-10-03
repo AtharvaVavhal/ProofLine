@@ -1,4 +1,6 @@
-import { Controller, Get, Param, Post, Req, Res, UseGuards } from '@nestjs/common';
+import { Body, Controller, Get, Param, Post, Req, Res, UseGuards } from '@nestjs/common';
+import { z } from 'zod';
+import { parseInput } from '../common/validation';
 import type { ActivityResponse, StartAnalysisResponse } from '@proofline/shared';
 import type { Response } from 'express';
 import { CurrentUser } from '../auth/current-user.decorator';
@@ -22,10 +24,12 @@ export class AnalysisController {
   @RateLimit(ANALYZE_LIMIT)
   async analyze(
     @Param('id') caseId: string,
+    @Body() input: unknown,
     @CurrentUser() user: AuthenticatedUser,
     @Req() req: AppRequest,
     @Res({ passthrough: true }) res: Response,
   ): Promise<StartAnalysisResponse> {
+    parseInput(z.strictObject({}), input ?? {});
     const { created, body } = await this.orchestrator.start(caseId, actor(user, req));
     res.status(created ? 202 : 200);
     return body;

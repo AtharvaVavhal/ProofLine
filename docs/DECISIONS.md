@@ -1299,3 +1299,35 @@ These can be settled while writing `03`–`07` or during the build. None changes
 | Time-contradiction tolerance (must flag 12:19 vs ~12:40; must not flag the ~12:05 call) | `08-EVIDENCE-GRAPH-TIMELINE.md` |
 | Artifact rendering tooling, manifest and benchmark file formats | `13-SYNTHETIC-DATA-SPECIFICATION.md` |
 | Urgency caching (stored derived value vs. computed on read) | `03-DATABASE-SCHEMA.md` / `04-TECHNICAL-ARCHITECTURE.md` |
+
+---
+
+## 12. Owner resolution — Phase 8 and joint Gate G (2026-10-03)
+
+```text
+Decision:            Phase 8 acceptance timing: OPTION 4, joint integration milestone.
+Final Decision:      Phase 8 is an Analysis Orchestration infrastructure phase. Its readiness can be
+                     accepted before the processors assigned to Phases 9, 10 and 12 exist.
+                     Infrastructure readiness proves deterministic planning, dependencies, lifecycle
+                     gates, re-entry, retry/resume, concurrency and mutation protection, deletion,
+                     idempotency, Phase 5–7 integration and unavailable-processor handling.
+                     The original requirement remains the FINAL JOINT INTEGRATION GATE:
+                     "a full run reaches ACTIONS_READY deterministically twice in a row with identical
+                     outputs (excluding timestamps and IDs)".
+                     Execute that gate only after the required processors exist. Do not fabricate
+                     results, mark missing processors successful, or advance to ACTIONS_READY early.
+Rationale:           14 §15 and 15 §51 identify Gate G as a joint P8/P12 integration gate. Distinguish
+                     infrastructure readiness from final full-run acceptance; preserve processor
+                     ownership and all product lifecycle/provenance/security requirements.
+Interim execution:   Real Phase 5–7 processors continue to run. Later step contracts remain pending
+                     when unavailable. No analysis run may falsely succeed. Use existing internal
+                     status/error conventions; no new public failure code is authorised.
+Implementation note: A blocked attempt ends FAILED with the existing INTERNAL_ERROR (retryable),
+                     while unavailable steps stay PENDING, with no domain outputs. This releases
+                     active-run protection for retry/correction without claiming analysis completion.
+                     CORRELATE can compute Phase 7 facts after NORMALIZE; the CORRELATED lifecycle
+                     gate still requires successful SCAM_ANALYSIS as well as CORRELATE.
+Documents affected:  14 Phase 8 exit gate/R-N3; 15 §31/§51 acceptance timing only. No product rules,
+                     domain processor assignments, public enums or final Gate G requirement change.
+Status:              ACCEPTED — explicitly ratified by the owner in this implementation session.
+```

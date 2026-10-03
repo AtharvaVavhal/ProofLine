@@ -29,7 +29,7 @@ Three categories are kept separate throughout:
 |---|---|---|
 | R-N1 | The Master Spec does not reproduce a seven-day plan. It records source §20 "7-day plan" as planning context only (01 Appendix B). | §26 builds the seven days from frozen dependencies and the dated `DECISIONS.md` deadlines |
 | R-N2 | Document 03 has no field table for `analysis_runs` / `agent_steps` (05 N-3) | Implement **only** attributes referenced in 03 §15/§21/§23.6, 04 §14, 05 §11.2 and 06 §24/§31 (§13). Smallest compatible implementation (§34). |
-| R-N3 | Processing steps (PARSE/EXTRACT) run **inside analysis runs** (06 §4), so minimal run/step/job infrastructure must exist before the pipeline | Phase 5 introduces the minimal run + step + queue. Phase 8 completes orchestration (plan, re-entry, state machine to `ACTIONS_READY`). |
+| R-N3 | Processing steps (PARSE/EXTRACT) run **inside analysis runs** (06 §4), so minimal run/step/job infrastructure must exist before the pipeline | Phase 5 introduces the minimal run + step + queue. Phase 8 completes orchestration infrastructure; the full `ACTIONS_READY` gate is the joint integration milestone after the required processors exist (`DECISIONS.md` §12). |
 | R-N4 | The case reference is server-assigned (03 §5.1). The demo shows `CF-10001` only on a fresh database (12 D-1). | Demo freeze uses a fresh DB (§19 Phase 19) |
 | R-N5 | Frontend API gaps G1–G4 (10 §39.2) | UI workarounds as specified. No new endpoints. |
 
@@ -320,7 +320,8 @@ Phases 0–19 (20 phases). Each uses the template in §8.
   - Re-entry triggers (CORRECTION, ANSWER, EVIDENCE_DELETION); `alreadyActive`; 409 rules for mutations during runs.
   - `fallbackUsed` + `FALLBACK_USED` audit.
 - **Tests:** concurrent analyze → one run; failed-step retry resumes; deletion mid-run stops cleanly; re-run creates no duplicates.
-- **Exit gate (Gate G part 1):** a full run reaches `ACTIONS_READY` deterministically twice in a row with identical outputs (excluding timestamps and IDs).
+- **Infrastructure readiness:** planning, dependencies, lifecycle/evidence gates, re-entry, retry/resume, concurrency/mutation protection, deletion, idempotency, Phase 5–7 integration and unavailable-processor handling pass. Missing processors produce no fake outputs or successful steps (`DECISIONS.md` §12).
+- **Final joint integration gate (Gate G part 1, after the required processors exist):** a full run reaches `ACTIONS_READY` deterministically twice in a row with identical outputs (excluding timestamps and IDs).
 
 ### Phase 9 — Scam Analysis
 - **Objective:** validated signals.

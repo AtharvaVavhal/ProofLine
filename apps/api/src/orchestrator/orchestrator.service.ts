@@ -1,10 +1,11 @@
 import { createHash } from 'node:crypto';
-import { Injectable, Logger } from '@nestjs/common';
-import type { AgentStep, EvidenceItem, Prisma, RunTrigger, StepName } from '@prisma/client';
+import { Inject, Injectable, Logger, Optional } from '@nestjs/common';
+import type { AgentStep, EvidenceItem, Prisma, StepName } from '@prisma/client';
 import type { ActivityResponse, StartAnalysisResponse } from '@proofline/shared';
 import type { AiCallMetrics } from '../ai/ai-gateway.service';
 import { AuditService } from '../audit/audit.service';
 import { CaseAccessService } from '../cases/case-access.service';
+import { CaseStateService } from '../cases/case-state.service';
 import { ApiError } from '../common/api-error';
 import { PrismaService } from '../database/prisma.service';
 import {
@@ -25,22 +26,23 @@ import type { AnalyzeCaseJob } from '../jobs/queue.service';
 import { ProcessingFailure } from '../processing/parsed-evidence';
 import { ProcessingService } from '../processing/processing.service';
 import { AnalysisRunsService, runSummary } from './analysis-runs.service';
+import {
+  ANALYSIS_PLAN,
+  AVAILABLE_CASE_STEPS,
+  DEPENDENCIES,
+  UNAVAILABLE_STEPS,
+  planFor,
+} from './analysis-plan';
+import { CASE_STEP_PROCESSORS, CaseStepFailure, CaseStepProcessor } from './case-step-processor';
+export { planFor } from './analysis-plan';
 
 type Actor = { userId: string; requestId: string };
 
 /**
- * Phase 7 slots of the established order (06 §4.2; 14 Phase 7). SCAM_ANALYSIS and later
- * analysis steps and lifecycle advancement are deferred; no placeholder analysis runs here.
+ * Complete step contracts (06 §4.2). DECISIONS §12 separates infrastructure readiness from
+ * the final joint Gate G. Unavailable processors stay pending, never successful.
  */
-export const PHASE_PLAN: StepName[] = ['PLAN', 'PARSE', 'EXTRACT', 'NORMALIZE', 'CORRELATE'];
-
-/**
- * Re-entry plans (06 §4.3) restricted to implemented steps. A correction re-runs NORMALIZE
- * onward and never re-parses evidence.
- */
-export function planFor(trigger: RunTrigger): StepName[] {
-  return trigger === 'CORRECTION' ? ['PLAN', 'NORMALIZE', 'CORRELATE'] : PHASE_PLAN;
-}
+export const PHASE_PLAN: readonly StepName[] = ANALYSIS_PLAN;
 
 /** Items processed in parallel inside one run (07 §29: limited concurrency). */
 const ITEM_CONCURRENCY = 2;
@@ -52,13 +54,14 @@ export const stepInputHash = (sha256: string, step: StepName) =>
 class CaseGoneError extends Error {}
 
 /**
- * Case orchestrator, minimal form until Phase 8 (14 R-N3; 06 §4; 04 §14): one active run per
- * case, a stored plan, idempotent PARSE and EXTRACT steps, and run/step status. It never calls
+ * Case orchestration (14 R-N3; 06 §4; 04 §14): one active run per
+ * case, a stored plan, idempotent processors, and run/step status. It never calls
  * an LLM itself; EXTRACT reaches the model only through the extraction module and the gateway.
  */
 @Injectable()
 export class OrchestratorService {
   private readonly logger = new Logger('Orchestrator');
+  private readonly executing = new Set<string>();
 
   constructor(
     private readonly prisma: PrismaService,
@@ -70,6 +73,8 @@ export class OrchestratorService {
     private readonly extraction: ExtractionService,
     private readonly entityResolution: EntityResolutionService,
     private readonly correlation: CorrelationService,
+    private readonly caseState: CaseStateService,
+    @Optional() @Inject(CASE_STEP_PROCESSORS) private readonly processors: CaseStepProcessor[] = [],
   ) {}
 
   /** POST /cases/:id/analyze (05 §11.1). Asynchronous; returns the queued or already active run. */
@@ -116,6 +121,10 @@ export class OrchestratorService {
 
   /** Worker entry point. Safe to call repeatedly for the same run (redelivery resumes it). */
   async execute(job: AnalyzeCaseJob): Promise<void> {
+    // pg-boss serialises normal deliveries; this also coalesces same-process redelivery.
+    // Every write still verifies the run/case under a database lock.
+    if (this.executing.has(job.runId)) return;
+    this.executing.add(job.runId);
     try {
       const ready = await this.planRun(job);
       if (!ready) return;
@@ -130,7 +139,16 @@ export class OrchestratorService {
         });
         await inPool(steps, ITEM_CONCURRENCY, run);
       }
-      for (const stepName of ['NORMALIZE', 'CORRELATE'] as const) {
+      if (!(await this.evidenceGate(job))) {
+        await this.finishRun(job.runId);
+        return;
+      }
+      for (const stepName of ANALYSIS_PLAN.slice(3)) {
+        if (
+          !AVAILABLE_CASE_STEPS.includes(stepName) &&
+          !this.processors.some((p) => p.name === stepName)
+        )
+          continue;
         const steps = await this.prisma.agentStep.findMany({
           where: {
             runId: job.runId,
@@ -148,6 +166,8 @@ export class OrchestratorService {
         `Run failed unexpectedly: ${error instanceof Error ? error.constructor.name : 'unknown'}`,
       );
       await this.failRun(job.runId, 'INTERNAL_ERROR', true).catch(() => undefined);
+    } finally {
+      this.executing.delete(job.runId);
     }
   }
 
@@ -178,11 +198,24 @@ export class OrchestratorService {
         return true; // redelivery: resume
       }
 
-      const plan = planFor(run.trigger);
+      const state = await tx.case.findUniqueOrThrow({ where: { id: job.caseId } });
+      const statement = await tx.userStatement.findFirst({
+        where: { caseId: job.caseId, statementKind: { in: ['CORRECTION', 'FOLLOW_UP_ANSWER'] } },
+        orderBy: { createdAt: 'desc' },
+      });
+      const plan = planFor(run.trigger, {
+        state: state.status,
+        timeChanged: statement?.valueDatetime !== null && statement?.valueDatetime !== undefined,
+      });
+      const evidence = await tx.evidenceItem.findMany({
+        where: { caseId: job.caseId },
+        orderBy: { sequenceNo: 'asc' },
+      });
       const items = plan.includes('PARSE')
         ? await tx.evidenceItem.findMany({
             where: {
               caseId: job.caseId,
+              uploadedAt: { lte: run.createdAt },
               OR: [
                 { processingStatus: 'UPLOADED' },
                 { processingStatus: 'FAILED', failureRetryable: true },
@@ -201,7 +234,11 @@ export class OrchestratorService {
           status: 'SUCCEEDED',
           startedAt: now,
           finishedAt: now,
-          outputSummary: { items: items.length },
+          outputSummary: {
+            items: items.length,
+            evidence: evidence.map((e) => ({ id: e.id, sha256: e.sha256 })),
+            statements: await this.statementIds(tx, job.caseId),
+          },
         },
       });
       if (items.length > 0) {
@@ -218,7 +255,7 @@ export class OrchestratorService {
           data: [...perItem('PARSE', 2), ...perItem('EXTRACT', 2 + items.length)],
         });
       }
-      for (const [index, stepName] of (['NORMALIZE', 'CORRELATE'] as const).entries()) {
+      for (const [index, stepName] of ANALYSIS_PLAN.slice(3).entries()) {
         if (plan.includes(stepName)) {
           await tx.agentStep.create({
             data: {
@@ -244,12 +281,6 @@ export class OrchestratorService {
 
   /** PARSE for one item: read + parse outside the transaction, then persist atomically. */
   private async runParseStep(step: AgentStep): Promise<void> {
-    const claimed = await this.prisma.agentStep.updateMany({
-      where: { id: step.id, status: { in: ['PENDING', 'RUNNING'] } },
-      data: { status: 'RUNNING', startedAt: new Date() },
-    });
-    if (!claimed.count) return;
-
     // Idempotency (07 §24): the same evidence bytes already parsed successfully, and that parse
     // is still stored (EXTRACT failed later) → skip and reuse its lines.
     const prior = await this.prisma.agentStep.findFirst({
@@ -270,12 +301,30 @@ export class OrchestratorService {
           })
         : 0;
     if (prior && storedParse > 0) {
-      await this.prisma.agentStep.update({
-        where: { id: step.id },
-        data: { status: 'SKIPPED', finishedAt: new Date() },
+      await this.prisma.$transaction(async (tx) => {
+        if (!(await this.lockCaseStep(tx, step))) return;
+        const current = await tx.agentStep.findUniqueOrThrow({ where: { id: step.id } });
+        await tx.agentStep.update({
+          where: { id: step.id },
+          data: {
+            status: current.status === 'PENDING' ? 'SKIPPED' : 'SUCCEEDED',
+            outputSummary: { reusedStepId: prior.id },
+            finishedAt: new Date(),
+          },
+        });
       });
       return;
     }
+
+    const claimed = await this.prisma.$transaction(async (tx) => {
+      if (!(await this.lockCaseStep(tx, step))) return false;
+      await tx.agentStep.update({
+        where: { id: step.id },
+        data: { status: 'RUNNING', startedAt: step.startedAt ?? new Date() },
+      });
+      return true;
+    });
+    if (!claimed) return;
 
     const item = step.evidenceId
       ? await this.prisma.evidenceItem.findUnique({ where: { id: step.evidenceId } })
@@ -306,8 +355,7 @@ export class OrchestratorService {
         const cases = await tx.$queryRaw<{ id: string }[]>`
           SELECT id FROM cases WHERE id = ${step.caseId}::uuid FOR UPDATE`;
         if (!cases.length) throw new CaseGoneError();
-        const stepState = await tx.agentStep.findUnique({ where: { id: step.id } });
-        if (stepState?.status === 'SUCCEEDED') return;
+        if (!(await this.lockCaseStep(tx, step))) return;
         const [current] = await tx.$queryRaw<EvidenceItem[]>`
           SELECT id FROM evidence_items WHERE id = ${item.id}::uuid FOR UPDATE`;
         const fresh = current ? await tx.evidenceItem.findUnique({ where: { id: item.id } }) : null;
@@ -344,26 +392,43 @@ export class OrchestratorService {
    * then validation + extractions + PROCESSED atomically. Skipped when PARSE did not succeed.
    */
   private async runExtractStep(step: AgentStep): Promise<void> {
-    const claimed = await this.prisma.agentStep.updateMany({
-      where: { id: step.id, status: { in: ['PENDING', 'RUNNING'] } },
-      data: { status: 'RUNNING', startedAt: new Date() },
-    });
-    if (!claimed.count) return;
-    const item = step.evidenceId
-      ? await this.prisma.evidenceItem.findUnique({ where: { id: step.evidenceId } })
-      : null;
-    if (!item || stepInputHash(item.sha256 ?? '', 'EXTRACT') !== step.inputHash) {
-      await this.markStepChanged(step);
-      return;
-    }
-    if (item.processingStatus !== 'PROCESSING') {
-      // PARSE failed for this item in this run (it is FAILED), so there is nothing to extract.
-      await this.prisma.agentStep.update({
+    const item = await this.prisma.$transaction(async (tx) => {
+      if (!(await this.lockCaseStep(tx, step))) return null;
+      const item = step.evidenceId
+        ? await tx.evidenceItem.findFirst({
+            where: { id: step.evidenceId, caseId: step.caseId },
+          })
+        : null;
+      if (!item || stepInputHash(item.sha256 ?? '', 'EXTRACT') !== step.inputHash) {
+        await this.completeStep(tx, step.id, {
+          status: 'FAILED',
+          failureCode: 'CASE_CHANGED_DURING_RUN',
+          failureRetryable: true,
+        });
+        return null;
+      }
+      if (item.processingStatus !== 'PROCESSING') {
+        // A failed PARSE contributes no extraction work. Skip before starting the processor.
+        const current = await tx.agentStep.findUniqueOrThrow({ where: { id: step.id } });
+        await tx.agentStep.update({
+          where: { id: step.id },
+          data: {
+            status: current.status === 'PENDING' ? 'SKIPPED' : 'FAILED',
+            ...(current.status === 'RUNNING'
+              ? { failureCode: 'CASE_CHANGED_DURING_RUN', failureRetryable: true }
+              : {}),
+            finishedAt: new Date(),
+          },
+        });
+        return null;
+      }
+      await tx.agentStep.update({
         where: { id: step.id },
-        data: { status: 'SKIPPED', finishedAt: new Date() },
+        data: { status: 'RUNNING', startedAt: step.startedAt ?? new Date() },
       });
-      return;
-    }
+      return item;
+    });
+    if (!item) return;
 
     let prepared: PreparedExtraction | null = null;
     let failure: ExtractionFailure | null = null;
@@ -380,8 +445,7 @@ export class OrchestratorService {
         const cases = await tx.$queryRaw<{ id: string }[]>`
           SELECT id FROM cases WHERE id = ${step.caseId}::uuid FOR UPDATE`;
         if (!cases.length) throw new CaseGoneError();
-        const stepState = await tx.agentStep.findUnique({ where: { id: step.id } });
-        if (stepState?.status === 'SUCCEEDED') return;
+        if (!(await this.lockCaseStep(tx, step))) return;
         const [current] = await tx.$queryRaw<EvidenceItem[]>`
           SELECT id FROM evidence_items WHERE id = ${item.id}::uuid FOR UPDATE`;
         const fresh = current ? await tx.evidenceItem.findUnique({ where: { id: item.id } }) : null;
@@ -431,6 +495,14 @@ export class OrchestratorService {
   private async runCaseStep(step: AgentStep): Promise<void> {
     const started = await this.prisma.$transaction(async (tx) => {
       if (!(await this.lockCaseStep(tx, step))) return false;
+      if (!(await this.inputsUnchanged(tx, step.runId, step.caseId))) {
+        await this.completeStep(tx, step.id, {
+          status: 'FAILED',
+          failureCode: 'CASE_CHANGED_DURING_RUN',
+          failureRetryable: true,
+        });
+        return false;
+      }
       const prior = await tx.agentStep.findMany({
         where: { runId: step.runId, sequenceNo: { lt: step.sequenceNo } },
       });
@@ -443,7 +515,9 @@ export class OrchestratorService {
         return false;
       }
       // An item step whose evidence was deleted (evidence_id set null) means the case changed.
-      if (prior.some((s) => s.inputHash && !s.evidenceId)) {
+      if (
+        prior.some((s) => ['PARSE', 'EXTRACT'].includes(s.stepName) && s.inputHash && !s.evidenceId)
+      ) {
         await this.completeStep(tx, step.id, {
           status: 'FAILED',
           failureCode: 'CASE_CHANGED_DURING_RUN',
@@ -451,41 +525,106 @@ export class OrchestratorService {
         });
         return false;
       }
-      if (prior.some((s) => s.status === 'PENDING' || s.status === 'RUNNING')) return false;
+      const dependencies = prior.filter((s) => DEPENDENCIES[step.stepName]?.includes(s.stepName));
+      if (dependencies.some((s) => s.status === 'PENDING' || s.status === 'RUNNING')) return false;
       // A skipped dependency cannot produce a successful downstream correlation step.
-      if (
-        step.stepName === 'CORRELATE' &&
-        prior.some((s) => s.stepName === 'NORMALIZE' && s.status !== 'SUCCEEDED')
-      ) {
+      if (!(await Promise.all(dependencies.map((s) => this.stepDone(tx, s)))).every(Boolean)) {
         await tx.agentStep.update({
           where: { id: step.id },
           data: { status: 'SKIPPED', finishedAt: new Date() },
         });
         return false;
       }
+      const inputHash = await this.caseStepHash(tx, step.caseId, step.stepName);
+      const run = await tx.analysisRun.findUniqueOrThrow({ where: { id: step.runId } });
+      if (run.trigger === 'USER_RETRY') {
+        const previous = await tx.analysisRun.findFirst({
+          where: {
+            caseId: step.caseId,
+            id: { not: step.runId },
+            kind: 'ANALYSIS',
+            status: 'FAILED',
+          },
+          orderBy: { createdAt: 'desc' },
+          include: { failedStep: true },
+        });
+        const failedName = previous?.failedStep?.stepName;
+        const candidate = await tx.agentStep.findFirst({
+          where: {
+            caseId: step.caseId,
+            stepName: step.stepName,
+            inputHash,
+            status: { in: ['SUCCEEDED', 'SKIPPED'] },
+            runId: previous?.id ?? '00000000-0000-0000-0000-000000000000',
+            id: { not: step.id },
+          },
+          orderBy: { finishedAt: 'desc' },
+        });
+        const reused =
+          candidate && (await this.stepDone(tx, candidate))
+            ? candidate.status === 'SUCCEEDED'
+              ? candidate
+              : await tx.agentStep.findUnique({
+                  where: { id: (candidate.outputSummary as { reusedStepId: string }).reusedStepId },
+                })
+            : null;
+        if (
+          reused &&
+          failedName &&
+          ANALYSIS_PLAN.indexOf(step.stepName) < ANALYSIS_PLAN.indexOf(failedName)
+        ) {
+          await tx.agentStep.update({
+            where: { id: step.id },
+            data: {
+              status: 'SKIPPED',
+              inputHash,
+              finishedAt: new Date(),
+              outputSummary: { reusedStepId: reused.id },
+            },
+          });
+          return false;
+        }
+      }
       await tx.agentStep.update({
         where: { id: step.id },
-        data: { status: 'RUNNING', startedAt: step.startedAt ?? new Date() },
+        data: { status: 'RUNNING', inputHash, startedAt: step.startedAt ?? new Date() },
       });
       return true;
     });
     if (!started) return;
     let prepared: PreparedCorrelation | null = null;
+    let extension: Awaited<ReturnType<CaseStepProcessor['prepare']>> | null = null;
     try {
+      const processor = this.processors.find((p) => p.name === step.stepName);
+      if (processor)
+        extension = await processor.prepare({
+          caseId: step.caseId,
+          runId: step.runId,
+          stepId: step.id,
+        });
       if (step.stepName === 'CORRELATE') prepared = await this.correlation.prepare(step.caseId);
       await this.prisma.$transaction(
         async (tx) => {
           if (!(await this.lockCaseStep(tx, step))) return;
-          const summary =
-            step.stepName === 'NORMALIZE'
+          const current = await tx.agentStep.findUniqueOrThrow({ where: { id: step.id } });
+          if (
+            !(await this.inputsUnchanged(tx, step.runId, step.caseId)) ||
+            current.inputHash !== (await this.caseStepHash(tx, step.caseId, step.stepName))
+          ) {
+            throw new CaseChangedError();
+          }
+          const summary = extension
+            ? await extension.persist(tx)
+            : step.stepName === 'NORMALIZE'
               ? await this.entityResolution.resolve(tx, step.caseId)
               : await this.correlation.save(tx, step.caseId, step.id, prepared!);
           await this.completeStep(tx, step.id, {
             status: 'SUCCEEDED',
             outputSummary: summary,
-            ...aiColumns(prepared?.metrics ?? null),
+            ...aiColumns(extension?.metrics ?? prepared?.metrics ?? null),
           });
-          if (prepared?.metrics?.fallbackUsed) {
+          await this.advanceLifecycle(tx, step.runId, step.caseId);
+          if (extension?.metrics?.fallbackUsed || prepared?.metrics?.fallbackUsed) {
             await tx.analysisRun.update({
               where: { id: step.runId },
               data: { fallbackUsed: true },
@@ -496,7 +635,7 @@ export class OrchestratorService {
               caseId: step.caseId,
               targetType: 'agent_step',
               targetId: step.id,
-              metadata: { stepName: 'CORRELATE' },
+              metadata: { stepName: step.stepName },
             });
           }
         },
@@ -505,13 +644,15 @@ export class OrchestratorService {
     } catch (error) {
       if (!(await this.caseExists(step.caseId))) throw new CaseGoneError();
       const code =
-        error instanceof CorrelationInputChanged
+        error instanceof CorrelationInputChanged || error instanceof CaseChangedError
           ? 'CASE_CHANGED_DURING_RUN'
-          : error instanceof CorrelationFailure
+          : error instanceof CorrelationFailure || error instanceof CaseStepFailure
             ? error.code
             : step.stepName === 'NORMALIZE'
               ? 'NORMALIZE_FAILED'
-              : 'CORRELATION_FAILED';
+              : step.stepName === 'CORRELATE'
+                ? 'CORRELATION_FAILED'
+                : 'INTERNAL_ERROR';
       // Fixed codes only: database/provider errors may embed source-derived values.
       this.logger.error(`${step.stepName} failed: ${code}`);
       await this.prisma.$transaction(async (tx) => {
@@ -521,7 +662,9 @@ export class OrchestratorService {
           failureCode: code,
           failureRetryable: true,
           ...aiColumns(
-            error instanceof CorrelationFailure ? error.metrics : (prepared?.metrics ?? null),
+            error instanceof CorrelationFailure || error instanceof CaseStepFailure
+              ? error.metrics
+              : (extension?.metrics ?? prepared?.metrics ?? null),
           ),
         });
       });
@@ -544,6 +687,159 @@ export class OrchestratorService {
     return current !== null;
   }
 
+  private statementIds(tx: Prisma.TransactionClient, caseId: string) {
+    return tx.userStatement.findMany({
+      where: { caseId },
+      select: { id: true },
+      orderBy: { id: 'asc' },
+    });
+  }
+
+  /** SKIPPED is completion only when it references actual same-case, same-input successful work. */
+  private async stepDone(tx: Prisma.TransactionClient, step: AgentStep): Promise<boolean> {
+    if (step.status === 'SUCCEEDED') return true;
+    if (step.status !== 'SKIPPED') return false;
+    const reused = step.outputSummary as { reusedStepId?: unknown } | null;
+    if (typeof reused?.reusedStepId !== 'string' || !step.inputHash) return false;
+    return (
+      (await tx.agentStep.count({
+        where: {
+          id: reused.reusedStepId,
+          caseId: step.caseId,
+          stepName: step.stepName,
+          inputHash: step.inputHash,
+          status: 'SUCCEEDED',
+        },
+      })) === 1
+    );
+  }
+
+  /** Lifecycle gates consume actual completion records, never the mere presence of a plan. */
+  private async advanceLifecycle(tx: Prisma.TransactionClient, runId: string, caseId: string) {
+    const steps = await tx.agentStep.findMany({ where: { runId, caseId } });
+    const completed = await Promise.all(
+      steps.map(async (s) => ({ name: s.stepName, done: await this.stepDone(tx, s) })),
+    );
+    const done = (name: StepName) => completed.some((s) => s.name === name && s.done);
+    let state = (await tx.case.findUniqueOrThrow({ where: { id: caseId } })).status;
+    const transition = async (to: typeof state) => {
+      await this.caseState.transition(tx, { caseId, from: state, to });
+      state = to;
+    };
+    if (state === 'EXTRACTED' && done('SCAM_ANALYSIS')) await transition('ANALYZING');
+    if (state === 'ANALYZING' && done('SCAM_ANALYSIS') && done('CORRELATE'))
+      await transition('CORRELATED');
+    if (state === 'CORRELATED' && done('TIMELINE')) await transition('TIMELINE_READY');
+    if (
+      state === 'TIMELINE_READY' &&
+      ['MISSING_INFO', 'ACTIONS', 'URGENCY'].every((n) => done(n as StepName))
+    ) {
+      await transition('ACTIONS_READY');
+    }
+  }
+
+  /** IDs/hashes only. No source text or credentials in run metadata. */
+  private async inputsUnchanged(tx: Prisma.TransactionClient, runId: string, caseId: string) {
+    const plan = await tx.agentStep.findFirst({ where: { runId, caseId, stepName: 'PLAN' } });
+    const snapshot = plan?.outputSummary as {
+      evidence?: { id: string; sha256: string | null }[];
+      statements?: { id: string }[];
+    } | null;
+    if (!snapshot?.evidence) return true; // persisted pre-P8 jobs still stop at the full-run gate
+    const evidence = await tx.evidenceItem.findMany({
+      where: { caseId },
+      select: { id: true, sha256: true },
+    });
+    return (
+      evidence.length === snapshot.evidence.length &&
+      snapshot.evidence.every((e) =>
+        evidence.some(
+          (current) => current.id === e.id && (e.sha256 === null || e.sha256 === current.sha256),
+        ),
+      ) &&
+      JSON.stringify(snapshot.statements) === JSON.stringify(await this.statementIds(tx, caseId))
+    );
+  }
+
+  private async caseStepHash(tx: Prisma.TransactionClient, caseId: string, stepName: StepName) {
+    const extractions = await tx.extraction.findMany({
+      where: { caseId },
+      orderBy: { id: 'asc' },
+      select: {
+        id: true,
+        normalizedValue: true,
+        correctedNormalizedValue: true,
+        correctionStatus: true,
+      },
+    });
+    const evidence = await tx.evidenceItem.findMany({
+      where: { caseId },
+      orderBy: { id: 'asc' },
+      select: { id: true, sha256: true, processingStatus: true },
+    });
+    return createHash('sha256')
+      .update(
+        JSON.stringify({
+          stepName,
+          evidence,
+          extractions,
+          statements: await this.statementIds(tx, caseId),
+        }),
+      )
+      .digest('hex');
+  }
+
+  /** INV-E9: every registered item must be PROCESSED, including excluded/late uploads. */
+  private async evidenceGate(job: AnalyzeCaseJob): Promise<boolean> {
+    return this.prisma.$transaction(async (tx) => {
+      const rows = await tx.$queryRaw<{ id: string }[]>`
+        SELECT id FROM cases WHERE id = ${job.caseId}::uuid FOR UPDATE`;
+      if (!rows.length) throw new CaseGoneError();
+      const run = await tx.analysisRun.findFirst({
+        where: { id: job.runId, caseId: job.caseId, status: 'RUNNING' },
+      });
+      if (!run) return false;
+      const failed = await tx.agentStep.count({ where: { runId: job.runId, status: 'FAILED' } });
+      let code: string | null = null;
+      if (!(await this.inputsUnchanged(tx, job.runId, job.caseId)))
+        code = 'CASE_CHANGED_DURING_RUN';
+      else if (!failed) {
+        const evidence = await tx.evidenceItem.findMany({ where: { caseId: job.caseId } });
+        if (!evidence.length || evidence.some((e) => e.processingStatus !== 'PROCESSED'))
+          code = 'EVIDENCE_PENDING';
+      }
+      if (code || failed) {
+        const pending = await tx.agentStep.findMany({
+          where: {
+            runId: job.runId,
+            status: 'PENDING',
+            stepName: { notIn: ['PLAN', 'PARSE', 'EXTRACT'] },
+          },
+          orderBy: { sequenceNo: 'asc' },
+        });
+        if (code && pending[0])
+          await this.completeStep(tx, pending[0].id, {
+            status: 'FAILED',
+            failureCode: code,
+            failureRetryable: true,
+          });
+        await tx.agentStep.updateMany({
+          where: { runId: job.runId, status: 'PENDING' },
+          data: { status: 'SKIPPED', finishedAt: new Date() },
+        });
+        return false;
+      }
+      const kase = await tx.case.findUniqueOrThrow({ where: { id: job.caseId } });
+      if (kase.status === 'INGESTING')
+        await this.caseState.transition(tx, {
+          caseId: job.caseId,
+          from: kase.status,
+          to: 'EXTRACTED',
+        });
+      return true;
+    });
+  }
+
   private async completeStep(
     tx: Prisma.TransactionClient,
     stepId: string,
@@ -560,14 +856,17 @@ export class OrchestratorService {
   /** Evidence deleted or changed during the run (05 §23; 06 §24). */
   private async markStepChanged(step: AgentStep): Promise<void> {
     try {
-      await this.prisma.agentStep.update({
-        where: { id: step.id },
-        data: {
-          status: 'FAILED',
-          failureCode: 'CASE_CHANGED_DURING_RUN',
-          failureRetryable: true,
-          finishedAt: new Date(),
-        },
+      await this.prisma.$transaction(async (tx) => {
+        if (!(await this.lockCaseStep(tx, step))) return;
+        await tx.agentStep.update({
+          where: { id: step.id },
+          data: {
+            status: 'FAILED',
+            failureCode: 'CASE_CHANGED_DURING_RUN',
+            failureRetryable: true,
+            finishedAt: new Date(),
+          },
+        });
       });
     } catch {
       throw new CaseGoneError();
@@ -579,6 +878,33 @@ export class OrchestratorService {
     await this.prisma.$transaction(async (tx) => {
       const run = await tx.analysisRun.findUnique({ where: { id: runId } });
       if (!run || run.status !== 'RUNNING') return;
+      const rows = await tx.$queryRaw<{ id: string }[]>`
+        SELECT id FROM cases WHERE id = ${run.caseId}::uuid FOR UPDATE`;
+      if (!rows.length) return;
+      const current = await tx.analysisRun.findUnique({ where: { id: runId } });
+      if (current?.status !== 'RUNNING') return;
+      // A mutation can commit after the last processor but before run completion.
+      // Recheck under the same lock used to finalise the run; retain completed facts.
+      if (!(await this.inputsUnchanged(tx, runId, run.caseId))) {
+        await tx.analysisRun.update({
+          where: { id: runId },
+          data: {
+            status: 'FAILED',
+            failureCode: 'CASE_CHANGED_DURING_RUN',
+            failureRetryable: true,
+            finishedAt: new Date(),
+          },
+        });
+        await this.audit.record(tx, {
+          action: 'ANALYSIS_FAILED',
+          outcome: 'FAILED',
+          caseId: run.caseId,
+          targetType: 'analysis_run',
+          targetId: runId,
+          metadata: { code: 'CASE_CHANGED_DURING_RUN' },
+        });
+        return;
+      }
       const failed = await tx.agentStep.findMany({
         where: { runId, status: 'FAILED' },
         orderBy: { sequenceNo: 'asc' },
@@ -608,8 +934,65 @@ export class OrchestratorService {
         });
         return;
       }
-      if (await tx.agentStep.count({ where: { runId, status: { in: ['PENDING', 'RUNNING'] } } }))
+      if (await tx.agentStep.count({ where: { runId, status: { in: ['PENDING', 'RUNNING'] } } })) {
+        // Missing processors are not successful steps or fabricated business outputs.
+        // End the attempt using the existing error convention; retry retains completed facts.
+        const unavailable = await tx.agentStep.findFirst({
+          where: { runId, stepName: { in: [...UNAVAILABLE_STEPS] }, status: 'PENDING' },
+          orderBy: { sequenceNo: 'asc' },
+        });
+        if (!unavailable) return;
+        await tx.analysisRun.update({
+          where: { id: runId },
+          data: {
+            status: 'FAILED',
+            failedStepId: unavailable.id,
+            failureCode: 'INTERNAL_ERROR',
+            failureRetryable: true,
+            finishedAt: new Date(),
+          },
+        });
+        await this.audit.record(tx, {
+          action: 'ANALYSIS_FAILED',
+          outcome: 'FAILED',
+          caseId: run.caseId,
+          targetType: 'analysis_run',
+          targetId: runId,
+          metadata: { code: 'INTERNAL_ERROR' },
+        });
         return;
+      }
+      const kase = await tx.case.findUniqueOrThrow({ where: { id: run.caseId } });
+      const steps = await tx.agentStep.findMany({ where: { runId, caseId: run.caseId } });
+      const plan = Array.isArray(run.plan) ? (run.plan as StepName[]) : [];
+      const completed = await Promise.all(steps.map((s) => this.stepDone(tx, s)));
+      const planComplete =
+        plan.length > 0 &&
+        plan.every(
+          (name) =>
+            steps.some((s) => s.stepName === name) &&
+            steps.every((s, i) => s.stepName !== name || completed[i]),
+        );
+      if (kase.status !== 'ACTIONS_READY' || !planComplete) {
+        await tx.analysisRun.update({
+          where: { id: runId },
+          data: {
+            status: 'FAILED',
+            failureCode: 'INTERNAL_ERROR',
+            failureRetryable: true,
+            finishedAt: new Date(),
+          },
+        });
+        await this.audit.record(tx, {
+          action: 'ANALYSIS_FAILED',
+          outcome: 'FAILED',
+          caseId: run.caseId,
+          targetType: 'analysis_run',
+          targetId: runId,
+          metadata: { code: 'INTERNAL_ERROR' },
+        });
+        return;
+      }
       await tx.analysisRun.update({
         where: { id: runId },
         data: { status: 'SUCCEEDED', finishedAt: new Date() },
@@ -628,12 +1011,32 @@ export class OrchestratorService {
     await this.prisma.$transaction(async (tx) => {
       const run = await tx.analysisRun.findUnique({ where: { id: runId } });
       if (!run || (run.status !== 'QUEUED' && run.status !== 'RUNNING')) return;
+      const rows = await tx.$queryRaw<{ id: string }[]>`
+        SELECT id FROM cases WHERE id = ${run.caseId}::uuid FOR UPDATE`;
+      if (!rows.length) return;
+      const current = await tx.analysisRun.findUnique({ where: { id: runId } });
+      if (current?.status !== 'QUEUED' && current?.status !== 'RUNNING') return;
+      const running = await tx.agentStep.findFirst({
+        where: { runId, status: 'RUNNING' },
+        orderBy: { sequenceNo: 'asc' },
+      });
+      if (running)
+        await this.completeStep(tx, running.id, {
+          status: 'FAILED',
+          failureCode: code,
+          failureRetryable: retryable,
+        });
+      await tx.agentStep.updateMany({
+        where: { runId, status: 'PENDING' },
+        data: { status: 'SKIPPED', finishedAt: new Date() },
+      });
       await tx.analysisRun.update({
         where: { id: runId },
         data: {
           status: 'FAILED',
           failureCode: code,
           failureRetryable: retryable,
+          ...(running ? { failedStepId: running.id } : {}),
           finishedAt: new Date(),
         },
       });
@@ -734,6 +1137,16 @@ function describe(step: StepName, evidenceRef: string | null): string {
       return 'Matched identical details across evidence';
     case 'CORRELATE':
       return 'Connected the evidence';
+    case 'SCAM_ANALYSIS':
+      return 'Checked for known scam patterns';
+    case 'TIMELINE':
+      return 'Rebuilt the timeline';
+    case 'MISSING_INFO':
+      return 'Checked for missing information';
+    case 'ACTIONS':
+      return 'Prepared next steps';
+    case 'URGENCY':
+      return 'Set urgency (rule-based)';
     default:
       return step;
   }

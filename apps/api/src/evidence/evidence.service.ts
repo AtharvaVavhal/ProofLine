@@ -15,6 +15,7 @@ import { CaseAccessService } from '../cases/case-access.service';
 import { CaseStateService } from '../cases/case-state.service';
 import { ApiError } from '../common/api-error';
 import { PrismaService } from '../database/prisma.service';
+import { AnalysisRunsService } from '../orchestrator/analysis-runs.service';
 import { sweepOrphanEntities } from '../entities/entity-cleanup';
 import { sweepOrphanRelationships } from '../graph/relationship-cleanup';
 import {
@@ -86,6 +87,7 @@ export class EvidenceService {
     private readonly caseState: CaseStateService,
     private readonly audit: AuditService,
     private readonly presenter: EvidencePresenter,
+    private readonly runs: AnalysisRunsService,
     @Inject(OBJECT_STORAGE) private readonly storage: ObjectStorage,
   ) {}
 
@@ -418,6 +420,7 @@ export class EvidenceService {
         lock: true,
       });
       const item = await tx.evidenceItem.delete({ where: { id: evidenceId } });
+      await this.runs.interrupt(tx, owned.caseId);
       await sweepOrphanEntities(tx, owned.caseId);
       await sweepOrphanRelationships(tx, owned.caseId);
       await this.audit.record(tx, {

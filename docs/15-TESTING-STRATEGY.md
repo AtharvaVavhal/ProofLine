@@ -764,7 +764,7 @@ Negative tests: no DB, filesystem, network, shell or secret access is reachable 
 | RUN-07 | Evidence deleted mid-run | `CASE_CHANGED_DURING_RUN` |
 | RUN-08 | Mutations during a run | Corrections/answers/registration → 409 |
 | RUN-09 | Process restart | Job redelivered; no duplicates |
-| RUN-10 | Phase 5 minimal vs. Phase 8 full (Doc 14 R-N3) | PARSE/EXTRACT-only runs valid in P5; full plan in P8 |
+| RUN-10 | Phase 5 minimal vs. Phase 8 full (Doc 14 R-N3; DECISIONS §12) | PARSE/EXTRACT-only runs valid in P5; full plan contracts in P8; unavailable processors remain pending without fabricated results or full-run success. Final ACTIONS_READY validation waits for joint integration. |
 
 ---
 
@@ -1140,7 +1140,7 @@ flowchart LR
 | P5 | Processing | PIPE, OCR, RED, SL, RUN-01/06/10 | Gate E |
 | P6 | Extraction + provenance | EXT-01–12, PROV-01–10, AI-01–12 | Gate F (part) |
 | P7 | Entities + correlation | ENT-01–08, REL-01–14 | Gate F |
-| P8 | Orchestration | RUN-01–10 | Gate G (part) |
+| P8 | Orchestration | RUN-01–10, unavailable processors/no false completion, Phase 5–7 regression | Infrastructure readiness (DECISIONS §12); final Gate G deferred to joint integration after required processors exist |
 | P9 | Scam analysis | SA-01–08 | — |
 | P10 | Timeline | TL-01–19 | Gate H (part) |
 | P11 | Graph | API-7, REL-13 | Gate H |

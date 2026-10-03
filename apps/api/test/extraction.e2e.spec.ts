@@ -130,8 +130,19 @@ describe('extraction and provenance (07 §15–§17, §27; 06 §5–§6, §20–
       const id = await addPaste(t, owner.cookie, caseId, E06);
       const activity = await analyzeAndWait(t, owner.cookie, caseId);
       expect(activity.run).toMatchObject({
-        status: 'SUCCEEDED',
-        plan: ['PLAN', 'PARSE', 'EXTRACT', 'NORMALIZE', 'CORRELATE'],
+        status: 'FAILED',
+        plan: [
+          'PLAN',
+          'PARSE',
+          'EXTRACT',
+          'NORMALIZE',
+          'SCAM_ANALYSIS',
+          'CORRELATE',
+          'TIMELINE',
+          'MISSING_INFO',
+          'ACTIONS',
+          'URGENCY',
+        ],
       });
       expect(
         activity.steps.map(
@@ -147,14 +158,19 @@ describe('extraction and provenance (07 §15–§17, §27; 06 §5–§6, §20–
         ['PARSE', 'E01', 'SUCCEEDED', 'Read text from E01'],
         ['EXTRACT', 'E01', 'SUCCEEDED', 'Found key details in E01'],
         ['NORMALIZE', null, 'SUCCEEDED', 'Matched identical details across evidence'],
+        ['SCAM_ANALYSIS', null, 'PENDING', 'Checked for known scam patterns'],
         ['CORRELATE', null, 'SUCCEEDED', 'Connected the evidence'],
+        ['TIMELINE', null, 'PENDING', 'Rebuilt the timeline'],
+        ['MISSING_INFO', null, 'PENDING', 'Checked for missing information'],
+        ['ACTIONS', null, 'PENDING', 'Prepared next steps'],
+        ['URGENCY', null, 'PENDING', 'Set urgency (rule-based)'],
       ]);
       expect(
         (await prisma.evidenceItem.findUniqueOrThrow({ where: { id } })).processingStatus,
       ).toBe('PROCESSED');
-      // The EXTRACTED gate and later states belong to Phase 8 (14 R-N3).
+      // Phase 8 passes the real EXTRACTED gate; unavailable later processors stay pending.
       expect((await prisma.case.findUniqueOrThrow({ where: { id: caseId } })).status).toBe(
-        'INGESTING',
+        'EXTRACTED',
       );
     });
 
@@ -333,7 +349,10 @@ describe('extraction and provenance (07 §15–§17, §27; 06 §5–§6, §20–
       });
       const id = await addFile(t, owner.cookie, caseId, 'png', await image());
       const activity = await analyzeAndWait(t, owner.cookie, caseId);
-      expect(activity.run.status).toBe('SUCCEEDED');
+      expect(activity.run).toMatchObject({
+        status: 'FAILED',
+        failure: { code: 'INTERNAL_ERROR', retryable: true },
+      });
 
       // The prompt: one item's redacted lines as delimited data, fixed instructions, no OTP.
       const prompt = llm.requests.find((r) => r.evidenceBlocks.includes('KYC Support'))!;
@@ -400,14 +419,25 @@ describe('extraction and provenance (07 §15–§17, §27; 06 §5–§6, §20–
       });
       const id = await addPaste(t, owner.cookie, caseId, injection);
       const activity = await analyzeAndWait(t, owner.cookie, caseId);
-      expect(activity.run.plan).toEqual(['PLAN', 'PARSE', 'EXTRACT', 'NORMALIZE', 'CORRELATE']);
+      expect(activity.run.plan).toEqual([
+        'PLAN',
+        'PARSE',
+        'EXTRACT',
+        'NORMALIZE',
+        'SCAM_ANALYSIS',
+        'CORRELATE',
+        'TIMELINE',
+        'MISSING_INFO',
+        'ACTIONS',
+        'URGENCY',
+      ]);
       const rows = await extractions(id);
       expect(rows.map((r) => [r.fieldType, r.rawValue]).sort()).toEqual([
         ['DOMAIN', 'attacker.example'],
         ['URL', 'https://attacker.example/x'],
       ]);
       expect((await prisma.case.findUniqueOrThrow({ where: { id: caseId } })).status).toBe(
-        'INGESTING',
+        'EXTRACTED',
       );
       expect(llm.requests[0]!.evidenceBlocks).toContain('Ignore previous instructions');
       expect(llm.requests[0]!.instructions).not.toContain('Ignore previous instructions');
@@ -449,7 +479,11 @@ describe('extraction and provenance (07 §15–§17, §27; 06 §5–§6, §20–
 
       llm.respond = () => ({ candidates: [] });
       const second = await analyzeAndWait(t, owner.cookie, caseId);
-      expect(second.run).toMatchObject({ status: 'SUCCEEDED', trigger: 'USER_RETRY' });
+      expect(second.run).toMatchObject({
+        status: 'FAILED',
+        trigger: 'USER_RETRY',
+        failure: { code: 'INTERNAL_ERROR', retryable: true },
+      });
       expect(
         second.steps.map((s: { stepName: string; status: string }) => [s.stepName, s.status]),
       ).toEqual([
@@ -457,7 +491,12 @@ describe('extraction and provenance (07 §15–§17, §27; 06 §5–§6, §20–
         ['PARSE', 'SKIPPED'],
         ['EXTRACT', 'SUCCEEDED'],
         ['NORMALIZE', 'SUCCEEDED'],
+        ['SCAM_ANALYSIS', 'PENDING'],
         ['CORRELATE', 'SUCCEEDED'],
+        ['TIMELINE', 'PENDING'],
+        ['MISSING_INFO', 'PENDING'],
+        ['ACTIONS', 'PENDING'],
+        ['URGENCY', 'PENDING'],
       ]);
       expect(
         await prisma.sourceLine.findMany({ where: { evidenceId: id }, select: { id: true } }),
@@ -520,7 +559,7 @@ describe('extraction and provenance (07 §15–§17, §27; 06 §5–§6, §20–
       expect(
         await prisma.extraction.findMany({ where: { evidenceId: id }, select: { id: true } }),
       ).toEqual(before);
-      expect(await prisma.agentStep.count({ where: { runId: activity.run.id } })).toBe(5);
+      expect(await prisma.agentStep.count({ where: { runId: activity.run.id } })).toBe(10);
     });
 
     it('PROV-06/PROV-09: deleting evidence removes its lines and extractions', async () => {
@@ -560,7 +599,11 @@ describe('extraction and provenance (07 §15–§17, §27; 06 §5–§6, §20–
           activity.steps.find((s: { stepName: string }) => s.stepName === 'EXTRACT').fallbackUsed,
         ).toBe(true);
         const audit = await prisma.auditLog.findFirstOrThrow({
-          where: { caseId, action: 'FALLBACK_USED' },
+          where: {
+            caseId,
+            action: 'FALLBACK_USED',
+            targetId: activity.steps.find((s: { stepName: string }) => s.stepName === 'EXTRACT').id,
+          },
         });
         expect([audit.actorKind, audit.metadata]).toEqual([
           'SYSTEM',
@@ -764,16 +807,30 @@ describe('extraction and provenance (07 §15–§17, §27; 06 §5–§6, §20–
         /90000|Checked/,
       );
 
-      // The CORRECTION re-entry plans only implemented steps and never re-parses evidence.
+      // The CORRECTION plan re-enters at NORMALIZE and never re-parses evidence.
       const run = await waitForRun(t, owner.cookie, caseId, res.body.run.id);
       expect(run.run).toMatchObject({
-        status: 'SUCCEEDED',
-        plan: ['PLAN', 'NORMALIZE', 'CORRELATE'],
+        status: 'FAILED',
+        plan: [
+          'PLAN',
+          'NORMALIZE',
+          'SCAM_ANALYSIS',
+          'CORRELATE',
+          'TIMELINE',
+          'MISSING_INFO',
+          'ACTIONS',
+          'URGENCY',
+        ],
       });
       expect(run.steps.map((s: { stepName: string }) => s.stepName)).toEqual([
         'PLAN',
         'NORMALIZE',
+        'SCAM_ANALYSIS',
         'CORRELATE',
+        'TIMELINE',
+        'MISSING_INFO',
+        'ACTIONS',
+        'URGENCY',
       ]);
 
       // A second correction supersedes the first; both statements stay (append-only).

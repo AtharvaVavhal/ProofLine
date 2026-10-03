@@ -29,6 +29,51 @@ export class AnalysisRunsService {
     return db.analysisRun.findFirst({ where: { caseId, status: { in: ['QUEUED', 'RUNNING'] } } });
   }
 
+  /** Evidence deletion ends an active run immediately, including a run waiting on dependencies.
+   * Caller holds the case lock. Completed facts/steps are retained (06 §24–§25). */
+  async interrupt(db: Prisma.TransactionClient, caseId: string): Promise<void> {
+    const active = await this.findActive(db, caseId);
+    if (!active) return;
+    const running = await db.agentStep.findFirst({
+      where: { runId: active.id, caseId, status: 'RUNNING' },
+      orderBy: { sequenceNo: 'asc' },
+    });
+    await db.agentStep.updateMany({
+      where: { runId: active.id, caseId, status: 'RUNNING' },
+      data: {
+        status: 'FAILED',
+        failureCode: 'CASE_CHANGED_DURING_RUN',
+        failureRetryable: true,
+        finishedAt: new Date(),
+      },
+    });
+    await db.agentStep.updateMany({
+      where: { runId: active.id, caseId, status: 'PENDING' },
+      data: {
+        status: 'SKIPPED',
+        finishedAt: new Date(),
+      },
+    });
+    await db.analysisRun.update({
+      where: { id: active.id },
+      data: {
+        status: 'FAILED',
+        failureCode: 'CASE_CHANGED_DURING_RUN',
+        failureRetryable: true,
+        ...(running ? { failedStepId: running.id } : {}),
+        finishedAt: new Date(),
+      },
+    });
+    await this.audit.record(db, {
+      action: 'ANALYSIS_FAILED',
+      outcome: 'FAILED',
+      caseId,
+      targetType: 'analysis_run',
+      targetId: active.id,
+      metadata: { code: 'CASE_CHANGED_DURING_RUN' },
+    });
+  }
+
   async enqueue(
     db: Prisma.TransactionClient,
     params: { caseId: string; trigger: RunTrigger; userId: string; requestId?: string },
