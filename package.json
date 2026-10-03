@@ -16,7 +16,8 @@
     "db:migrate": "pnpm --filter @proofline/api db:migrate",
     "db:status": "pnpm --filter @proofline/api db:status",
     "db:generate": "pnpm --filter @proofline/api db:generate",
-    "storage:init": "pnpm --filter @proofline/api storage:init"
+    "storage:init": "pnpm --filter @proofline/api storage:init",
+    "queue:install": "pnpm --filter @proofline/api queue:install"
   },
   "devDependencies": {
     "@eslint/js": "^9.39.5",

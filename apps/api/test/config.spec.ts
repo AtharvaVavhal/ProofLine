@@ -1,3 +1,4 @@
+import path from 'node:path';
 import { loadConfig } from '../src/config/env';
 
 describe('loadConfig', () => {
@@ -28,6 +29,14 @@ describe('loadConfig', () => {
         accessKeyId: 'key',
         secretAccessKey: 'storage-secret-hunter4',
       },
+      workerEnabled: true,
+      ai: {
+        provider: 'none',
+        model: null,
+        timeoutMs: 20_000,
+        demoFallback: 'off',
+        syntheticDir: path.resolve(__dirname, '../../../synthetic'),
+      },
     });
   });
 
@@ -49,6 +58,32 @@ describe('loadConfig', () => {
       /DATABASE_URL/,
     );
     expect(() => loadConfig({ ...valid, AUTH_SECRET: 'short' })).toThrow(/AUTH_SECRET/);
+  });
+
+  it('parses WORKER_ENABLED', () => {
+    expect(loadConfig({ ...valid, WORKER_ENABLED: 'false' }).workerEnabled).toBe(false);
+    expect(() => loadConfig({ ...valid, WORKER_ENABLED: 'yes' })).toThrow(/WORKER_ENABLED/);
+  });
+
+  it('parses the AI gateway settings (AD-06)', () => {
+    const ai = loadConfig({
+      ...valid,
+      LLM_MODEL: 'some-model',
+      LLM_TIMEOUT_MS: '5000',
+      DEMO_FALLBACK: 'auto',
+      SYNTHETIC_DIR: '/data/synthetic',
+    }).ai;
+    expect(ai).toEqual({
+      provider: 'none',
+      model: 'some-model',
+      timeoutMs: 5000,
+      demoFallback: 'auto',
+      syntheticDir: '/data/synthetic',
+    });
+    // No vendor adapter exists yet (OD-02), so a vendor name is refused rather than ignored.
+    expect(() => loadConfig({ ...valid, LLM_PROVIDER: 'openai' })).toThrow(/LLM_PROVIDER/);
+    expect(() => loadConfig({ ...valid, DEMO_FALLBACK: 'always' })).toThrow(/DEMO_FALLBACK/);
+    expect(() => loadConfig({ ...valid, LLM_TIMEOUT_MS: '10' })).toThrow(/LLM_TIMEOUT_MS/);
   });
 
   it('refuses the console email transport in production (no sign-in bypass)', () => {

@@ -1,3 +1,5 @@
+import { existsSync } from 'node:fs';
+import path from 'node:path';
 import { z } from 'zod';
 
 const envSchema = z
@@ -25,6 +27,20 @@ const envSchema = z
     STORAGE_FORCE_PATH_STYLE: z.enum(['true', 'false']).default('false'),
     STORAGE_ACCESS_KEY_ID: z.string().min(1),
     STORAGE_SECRET_ACCESS_KEY: z.string().min(1),
+    /** Runs the analysis worker in this process (OD-15: API and worker share one process). */
+    WORKER_ENABLED: z.enum(['true', 'false']).default('true'),
+    /**
+     * LLM adapter (OD-02). The vendor is an open implementation decision, so only `none` exists:
+     * EXTRACT then uses deterministic rule candidates alone (no model call).
+     */
+    LLM_PROVIDER: z.enum(['none']).default('none'),
+    LLM_MODEL: z.string().min(1).max(100).optional(),
+    /** Short fixed timeout per model call (06 §22) [IMPL]. */
+    LLM_TIMEOUT_MS: z.coerce.number().int().min(1000).max(120_000).default(20_000),
+    /** Disclosed cached results for the synthetic manifest only (AD-06, FR-027). */
+    DEMO_FALLBACK: z.enum(['off', 'auto', 'force']).default('off'),
+    /** Synthetic dataset root holding manifest.json and fallback/ (13 §34, §37). */
+    SYNTHETIC_DIR: z.string().min(1).optional(),
   })
   .refine((env) => !(env.NODE_ENV === 'production' && env.EMAIL_TRANSPORT === 'console'), {
     path: ['EMAIL_TRANSPORT'],
@@ -48,7 +64,26 @@ export type AppConfig = {
     accessKeyId: string;
     secretAccessKey: string;
   };
+  workerEnabled: boolean;
+  ai: {
+    provider: 'none';
+    model: string | null;
+    timeoutMs: number;
+    demoFallback: 'off' | 'auto' | 'force';
+    syntheticDir: string;
+  };
 };
+
+/** The workspace root (the directory holding pnpm-workspace.yaml), from source or build output. */
+function repositoryRoot(): string {
+  let dir = __dirname;
+  while (!existsSync(path.join(dir, 'pnpm-workspace.yaml'))) {
+    const parent = path.dirname(dir);
+    if (parent === dir) return process.cwd();
+    dir = parent;
+  }
+  return dir;
+}
 
 /**
  * Validates the process environment at boot (04 §30). Error messages name the offending
@@ -79,6 +114,14 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): AppConfig {
       forcePathStyle: data.STORAGE_FORCE_PATH_STYLE === 'true',
       accessKeyId: data.STORAGE_ACCESS_KEY_ID,
       secretAccessKey: data.STORAGE_SECRET_ACCESS_KEY,
+    },
+    workerEnabled: data.WORKER_ENABLED === 'true',
+    ai: {
+      provider: data.LLM_PROVIDER,
+      model: data.LLM_MODEL ?? null,
+      timeoutMs: data.LLM_TIMEOUT_MS,
+      demoFallback: data.DEMO_FALLBACK,
+      syntheticDir: path.resolve(data.SYNTHETIC_DIR ?? path.join(repositoryRoot(), 'synthetic')),
     },
   };
 }

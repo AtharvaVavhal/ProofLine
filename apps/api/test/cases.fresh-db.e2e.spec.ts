@@ -27,6 +27,12 @@ describe('case reference on a fresh database', () => {
       env: { ...process.env, PRISMA_HIDE_UPDATE_MESSAGE: '1' },
       stdio: 'pipe',
     });
+    // The app starts pg-boss with migrate: false, so the queue schema is installed first.
+    execFileSync(process.execPath, [resolve(__dirname, '../scripts/queue-install.mjs')], {
+      cwd: resolve(__dirname, '..'),
+      env: { ...process.env },
+      stdio: 'pipe',
+    });
     t = await createTestApp();
   }, 60_000);
 

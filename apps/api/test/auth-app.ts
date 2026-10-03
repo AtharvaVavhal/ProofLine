@@ -45,14 +45,20 @@ export type TestApp = {
   http: () => ReturnType<typeof request>;
 };
 
+export type ProviderOverride = { provide: unknown; useValue: unknown };
+
 export async function createTestApp(
   controllers: Type[] = [ProtectedProbeController],
+  overrides: ProviderOverride[] = [],
 ): Promise<TestApp> {
   const mail = new CapturingEmailTransport();
-  const moduleRef = await Test.createTestingModule({ imports: [AppModule], controllers })
+  let builder = Test.createTestingModule({ imports: [AppModule], controllers })
     .overrideProvider(EMAIL_TRANSPORT)
-    .useValue(mail)
-    .compile();
+    .useValue(mail);
+  for (const override of overrides) {
+    builder = builder.overrideProvider(override.provide).useValue(override.useValue);
+  }
+  const moduleRef = await builder.compile();
   const app = moduleRef.createNestApplication<NestExpressApplication>(APP_OPTIONS);
   configureApp(app);
   // Bound once, so concurrent supertest requests share one listener instead of adding one each.
@@ -121,7 +127,10 @@ export async function cleanupAuthTestData(): Promise<void> {
   });
   if (objects.length > 0) {
     const { adminStorage } = await import('./evidence-app');
-    await Promise.all(objects.map((o) => adminStorage.deleteObject(o.storageKey)));
+    // Best effort: pipeline tests keep objects in memory, and storage may be offline for them.
+    await Promise.all(
+      objects.map((o) => adminStorage.deleteObject(o.storageKey).catch(() => undefined)),
+    );
   }
   await prisma.case.deleteMany({ where: { owner: { email: like } } });
   await prisma.session.deleteMany({ where: { user: { email: like } } });

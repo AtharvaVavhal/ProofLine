@@ -86,6 +86,48 @@ export class CaseStateService {
   }
 
   /**
+   * S-4 re-entry (03 §23.1): a case at or beyond `to` moves back to `to`; a case that has not
+   * reached it keeps its status. Every backward transition voids active review confirmations.
+   * Returns the resulting status.
+   */
+  async rewind(
+    db: Prisma.TransactionClient,
+    params: {
+      caseId: string;
+      from: CaseStatus;
+      to: 'EXTRACTED' | 'TIMELINE_READY' | 'ACTIONS_READY';
+      actorUserId?: string;
+      requestId?: string;
+    },
+  ): Promise<CaseStatus> {
+    if (rank(params.from) <= rank(params.to)) return params.from;
+    await this.transition(db, params);
+    const active = await db.reviewConfirmation.findMany({
+      where: { caseId: params.caseId, voidedAt: null },
+      select: { id: true, reportId: true },
+    });
+    if (active.length > 0) {
+      await db.reviewConfirmation.updateMany({
+        where: { id: { in: active.map((c) => c.id) } },
+        data: { voidedAt: new Date(), voidReason: 'CASE_CHANGED' },
+      });
+      for (const confirmation of active) {
+        await this.audit.record(db, {
+          action: 'REPORT_CONFIRMATION_VOIDED',
+          outcome: 'SUCCEEDED',
+          actorUserId: params.actorUserId,
+          caseId: params.caseId,
+          targetType: 'report',
+          targetId: confirmation.reportId,
+          requestId: params.requestId,
+          metadata: { code: 'CASE_CHANGED' },
+        });
+      }
+    }
+    return params.to;
+  }
+
+  /**
    * After an evidence row is removed (deletion, rejection, abandonment): `NEW` if no evidence
    * remains, otherwise `INGESTING` (03 §23.1). Returns the resulting status.
    */

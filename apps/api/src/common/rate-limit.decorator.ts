@@ -14,3 +14,5 @@ export const EVIDENCE_UPLOAD_LIMIT: RateLimitBucket = {
   limit: 120,
   windowMs: HOUR_MS,
 };
+
+export const ANALYZE_LIMIT: RateLimitBucket = { name: 'analyze', limit: 30, windowMs: HOUR_MS };

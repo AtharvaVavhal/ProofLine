@@ -56,6 +56,8 @@ jobs:
       - run: pnpm db:generate
       - run: pnpm typecheck
       - run: pnpm db:migrate
+      - name: Install the pg-boss queue schema (migration role)
+        run: pnpm queue:install
       - name: Schema drift check
         run: pnpm --filter @proofline/api db:drift
       - run: pnpm test

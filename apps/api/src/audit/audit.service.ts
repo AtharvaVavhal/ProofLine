@@ -33,6 +33,13 @@ const METADATA_WHITELIST = {
   EVIDENCE_REJECTED: { evidenceRef: 'evidenceRef', code: 'code' },
   EVIDENCE_VIEWED: { evidenceRef: 'evidenceRef' },
   EVIDENCE_DELETED: { evidenceRef: 'evidenceRef', sha256: 'sha256' },
+  EVIDENCE_PROCESSING_FAILED: { evidenceRef: 'evidenceRef', code: 'code' },
+  ANALYSIS_STARTED: { trigger: 'code' },
+  ANALYSIS_COMPLETED: {},
+  ANALYSIS_FAILED: { code: 'code' },
+  FALLBACK_USED: { stepName: 'code', evidenceRef: 'evidenceRef' },
+  EXTRACTION_CORRECTED: { evidenceRef: 'evidenceRef', fieldType: 'code' },
+  REPORT_CONFIRMATION_VOIDED: { code: 'code' },
 } as const satisfies Record<string, Record<string, ValueKind>>;
 
 export type AuditAction = keyof typeof METADATA_WHITELIST;

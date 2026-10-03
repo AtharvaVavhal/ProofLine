@@ -7,14 +7,16 @@ This README covers only what is implemented so far.
 
 ## Status
 
-| Phase (docs/14)         | State                                                                                                                                                                                        |
-| ----------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| P0 Repository bootstrap | Minimal: pnpm workspace, `apps/api` (NestJS), `packages/shared` placeholder, lint/format, Docker Compose (PostgreSQL), CI workflow. `apps/web` and the storage emulator are not created yet. |
-| P1 Database foundation  | Implemented: the full `docs/03` schema, initial migration, Prisma client module, health check.                                                                                               |
-| P2 Authentication       | Implemented: email-code sign-in (`POST /api/auth/request-code`, `/verify-code`, `/logout`), httpOnly session cookie, global session guard, Origin check, audit writer, rate limits.          |
-| P3 Case management      | Implemented: `/api/cases` create, list (cursor), get, patch, delete, audit log; owner-scoped access; case state transitions.                                                                 |
-| P4 Evidence upload      | Implemented: register (signed PUT) → direct upload → `complete` (magic bytes, limits, SHA-256); pasted text/URL; list, signed download, removal; abandoned-upload cleanup.                   |
-| P5+                     | Not started. There is no processing, OCR, AI, graph, timeline, report or frontend.                                                                                                           |
+| Phase (docs/14)         | State                                                                                                                                                                                                                                                                                                                             |
+| ----------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| P0 Repository bootstrap | Minimal: pnpm workspace, `apps/api` (NestJS), `packages/shared` placeholder, lint/format, Docker Compose (PostgreSQL), CI workflow. `apps/web` and the storage emulator are not created yet.                                                                                                                                      |
+| P1 Database foundation  | Implemented: the full `docs/03` schema, initial migration, Prisma client module, health check.                                                                                                                                                                                                                                    |
+| P2 Authentication       | Implemented: email-code sign-in (`POST /api/auth/request-code`, `/verify-code`, `/logout`), httpOnly session cookie, global session guard, Origin check, audit writer, rate limits.                                                                                                                                               |
+| P3 Case management      | Implemented: `/api/cases` create, list (cursor), get, patch, delete, audit log; owner-scoped access; case state transitions.                                                                                                                                                                                                      |
+| P4 Evidence upload      | Implemented: register (signed PUT) → direct upload → `complete` (magic bytes, limits, SHA-256); pasted text/URL; list, signed download, removal; abandoned-upload cleanup.                                                                                                                                                        |
+| P5 Evidence processing  | Implemented: `POST /api/cases/:id/analyze` (pg-boss run: PLAN → PARSE per item), `GET /api/cases/:id/activity`, `GET /api/evidence/:id/source`; OCR (tesseract.js, bundled English data), PDF text-layer gate, TXT/paste, EML; OTP/card/account redaction before storage.                                                         |
+| P6 Extraction           | Implemented: EXTRACT step (PLAN → PARSE → EXTRACT); deterministic rule candidates + optional model candidates, literal validation against redacted source lines, `extractions` with line provenance; AI gateway skeleton (`LLM_PROVIDER=none`, cached demo fallback); `POST /api/cases/:id/extractions/:extractionId/correction`. |
+| P7+                     | Not started. There are no entities, graph, timeline, analysis, report or frontend.                                                                                                                                                                                                                                                |
 
 ## Layout
 
@@ -29,6 +31,10 @@ apps/api/                    NestJS API (+ worker in later phases)
   src/users/ src/audit/      users table owner; same-transaction audit writer with metadata whitelist
   src/cases/ src/provenance/ case lifecycle, ownership check, CASE_METADATA statements
   src/evidence/ src/storage/ evidence upload flow; ObjectStorage port + S3 adapter
+  src/jobs/ src/orchestrator/ pg-boss queue; analysis runs/steps, activity feed
+  src/processing/            parsers (OCR, PDF, TXT, EML), redaction, source lines, source view
+  src/extraction/            rule candidates, literal validator, normalisation, corrections
+  src/ai/                    AI gateway: LlmProvider port, timeouts, re-ask, cached fallback
   src/health/                GET /api/health (SELECT 1, public)
   test/                      config, health, schema-inspection and constraint tests
 packages/shared/             shared zod schemas and types (empty until a phase defines them)
@@ -51,6 +57,7 @@ cp apps/api/.env.example apps/api/.env
 pnpm storage:init                         # creates the private evidence bucket (CORS = WEB_ORIGIN)
 pnpm db:generate                          # Prisma client
 pnpm db:migrate                           # prisma migrate deploy (as the migration role)
+pnpm queue:install                        # pg-boss queue schema + runtime grants (migration role)
 pnpm dev                                  # builds packages/shared, then the API in watch mode → http://localhost:3001/api/health
 ```
 

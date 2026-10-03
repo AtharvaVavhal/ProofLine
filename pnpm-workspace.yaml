@@ -6,4 +6,5 @@ allowBuilds:
   '@prisma/client': true
   '@prisma/engines': true
   prisma: true
+  tesseract.js: false
   unrs-resolver: false
