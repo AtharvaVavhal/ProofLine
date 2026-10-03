@@ -3,3 +3,4 @@ export * from './cases';
 export * from './evidence';
 export * from './analysis';
 export * from './extraction';
+export * from './entities';

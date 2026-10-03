@@ -15,6 +15,8 @@ import { CaseAccessService } from '../cases/case-access.service';
 import { CaseStateService } from '../cases/case-state.service';
 import { ApiError } from '../common/api-error';
 import { PrismaService } from '../database/prisma.service';
+import { sweepOrphanEntities } from '../entities/entity-cleanup';
+import { sweepOrphanRelationships } from '../graph/relationship-cleanup';
 import {
   OBJECT_STORAGE,
   ObjectNotFoundError,
@@ -416,6 +418,8 @@ export class EvidenceService {
         lock: true,
       });
       const item = await tx.evidenceItem.delete({ where: { id: evidenceId } });
+      await sweepOrphanEntities(tx, owned.caseId);
+      await sweepOrphanRelationships(tx, owned.caseId);
       await this.audit.record(tx, {
         action: 'EVIDENCE_DELETED',
         outcome: 'SUCCEEDED',

@@ -27,7 +27,7 @@ class FakeLlm implements LlmProvider {
   respond: (request: LlmRequest) => unknown = () => ({ candidates: [] });
   async generateStructured(request: LlmRequest): Promise<LlmResponse> {
     this.requests.push(request);
-    const output = this.respond(request);
+    const output = request.step === 'CORRELATE' ? { relationships: [] } : this.respond(request);
     if (output instanceof LlmError) throw output;
     return { output, tokensIn: 100, tokensOut: 10 };
   }
@@ -131,7 +131,7 @@ describe('extraction and provenance (07 §15–§17, §27; 06 §5–§6, §20–
       const activity = await analyzeAndWait(t, owner.cookie, caseId);
       expect(activity.run).toMatchObject({
         status: 'SUCCEEDED',
-        plan: ['PLAN', 'PARSE', 'EXTRACT'],
+        plan: ['PLAN', 'PARSE', 'EXTRACT', 'NORMALIZE', 'CORRELATE'],
       });
       expect(
         activity.steps.map(
@@ -146,6 +146,8 @@ describe('extraction and provenance (07 §15–§17, §27; 06 §5–§6, §20–
         ['PLAN', null, 'SUCCEEDED', 'Planned the analysis'],
         ['PARSE', 'E01', 'SUCCEEDED', 'Read text from E01'],
         ['EXTRACT', 'E01', 'SUCCEEDED', 'Found key details in E01'],
+        ['NORMALIZE', null, 'SUCCEEDED', 'Matched identical details across evidence'],
+        ['CORRELATE', null, 'SUCCEEDED', 'Connected the evidence'],
       ]);
       expect(
         (await prisma.evidenceItem.findUniqueOrThrow({ where: { id } })).processingStatus,
@@ -398,7 +400,7 @@ describe('extraction and provenance (07 §15–§17, §27; 06 §5–§6, §20–
       });
       const id = await addPaste(t, owner.cookie, caseId, injection);
       const activity = await analyzeAndWait(t, owner.cookie, caseId);
-      expect(activity.run.plan).toEqual(['PLAN', 'PARSE', 'EXTRACT']);
+      expect(activity.run.plan).toEqual(['PLAN', 'PARSE', 'EXTRACT', 'NORMALIZE', 'CORRELATE']);
       const rows = await extractions(id);
       expect(rows.map((r) => [r.fieldType, r.rawValue]).sort()).toEqual([
         ['DOMAIN', 'attacker.example'],
@@ -454,6 +456,8 @@ describe('extraction and provenance (07 §15–§17, §27; 06 §5–§6, §20–
         ['PLAN', 'SUCCEEDED'],
         ['PARSE', 'SKIPPED'],
         ['EXTRACT', 'SUCCEEDED'],
+        ['NORMALIZE', 'SUCCEEDED'],
+        ['CORRELATE', 'SUCCEEDED'],
       ]);
       expect(
         await prisma.sourceLine.findMany({ where: { evidenceId: id }, select: { id: true } }),
@@ -483,15 +487,17 @@ describe('extraction and provenance (07 §15–§17, §27; 06 §5–§6, §20–
   describe('reliability and determinism', () => {
     it('same input bytes → identical extractions in two cases (NFR-11)', async () => {
       const shape = async (evidenceId: string) =>
-        (await extractions(evidenceId)).map((x) => ({
-          fieldType: x.fieldType,
-          raw: x.rawValue,
-          normalized: x.normalizedValue,
-          attributes: { ...(x.attributes as object), dateContextExtractionId: undefined },
-          lines: x.sourceLines.map((l) => [l.sourceLine.pageNumber, l.sourceLine.lineNumber]),
-          snippet: x.snippet,
-          confidence: x.confidence.toString(),
-        }));
+        (await extractions(evidenceId))
+          .map((x) => ({
+            fieldType: x.fieldType,
+            raw: x.rawValue,
+            normalized: x.normalizedValue,
+            attributes: { ...(x.attributes as object), dateContextExtractionId: undefined },
+            lines: x.sourceLines.map((l) => [l.sourceLine.pageNumber, l.sourceLine.lineNumber]),
+            snippet: x.snippet,
+            confidence: x.confidence.toString(),
+          }))
+          .sort((a, b) => JSON.stringify(a).localeCompare(JSON.stringify(b)));
       const a = await newCase();
       const b = await newCase();
       const ida = await addPaste(t, owner.cookie, a, E06);
@@ -514,7 +520,7 @@ describe('extraction and provenance (07 §15–§17, §27; 06 §5–§6, §20–
       expect(
         await prisma.extraction.findMany({ where: { evidenceId: id }, select: { id: true } }),
       ).toEqual(before);
-      expect(await prisma.agentStep.count({ where: { runId: activity.run.id } })).toBe(3);
+      expect(await prisma.agentStep.count({ where: { runId: activity.run.id } })).toBe(5);
     });
 
     it('PROV-06/PROV-09: deleting evidence removes its lines and extractions', async () => {
@@ -538,9 +544,13 @@ describe('extraction and provenance (07 §15–§17, §27; 06 §5–§6, §20–
         retryCount: 1,
         fallbackUsed: true,
       };
-      const spy = jest
-        .spyOn(t.app.get(AiGateway), 'generate')
-        .mockResolvedValue({ output: { candidates: [] }, metrics } as never);
+      const spy = jest.spyOn(t.app.get(AiGateway), 'generate').mockImplementation(
+        async (request) =>
+          ({
+            output: request.step === 'CORRELATE' ? { relationships: [] } : { candidates: [] },
+            metrics,
+          }) as never,
+      );
       try {
         const caseId = await newCase();
         await addPaste(t, owner.cookie, caseId, E06);
@@ -611,13 +621,14 @@ describe('extraction and provenance (07 §15–§17, §27; 06 §5–§6, §20–
         where: { evidenceId: otherId },
       });
       const provenance = t.app.get(ProvenanceService);
-      // A fact to own the sources (entities/edges are written in Phase 7; test-only rows).
-      const entity = await prisma.entity.create({
-        data: {
-          caseId,
-          entityType: 'PHONE',
-          canonicalValue: '+919000000001',
-          maskedValue: '+91 90XXX XX001',
+      // Phase 7 now creates the canonical phone; reuse it for the same provenance checks.
+      const entity = await prisma.entity.findUniqueOrThrow({
+        where: {
+          caseId_entityType_canonicalValue: {
+            caseId,
+            entityType: 'PHONE',
+            canonicalValue: '+919000000001',
+          },
         },
       });
       const domain = await prisma.entity.create({
@@ -755,8 +766,15 @@ describe('extraction and provenance (07 §15–§17, §27; 06 §5–§6, §20–
 
       // The CORRECTION re-entry plans only implemented steps and never re-parses evidence.
       const run = await waitForRun(t, owner.cookie, caseId, res.body.run.id);
-      expect(run.run).toMatchObject({ status: 'SUCCEEDED', plan: ['PLAN'] });
-      expect(run.steps.map((s: { stepName: string }) => s.stepName)).toEqual(['PLAN']);
+      expect(run.run).toMatchObject({
+        status: 'SUCCEEDED',
+        plan: ['PLAN', 'NORMALIZE', 'CORRELATE'],
+      });
+      expect(run.steps.map((s: { stepName: string }) => s.stepName)).toEqual([
+        'PLAN',
+        'NORMALIZE',
+        'CORRELATE',
+      ]);
 
       // A second correction supersedes the first; both statements stay (append-only).
       const again = await api()

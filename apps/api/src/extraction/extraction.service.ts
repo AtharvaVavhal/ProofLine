@@ -2,6 +2,8 @@ import { randomUUID } from 'node:crypto';
 import { Injectable } from '@nestjs/common';
 import type { EntityType, EvidenceItem, Prisma } from '@prisma/client';
 import { AiCallFailure, AiCallMetrics, AiGateway } from '../ai/ai-gateway.service';
+import { sweepOrphanEntities } from '../entities/entity-cleanup';
+import { sweepOrphanRelationships } from '../graph/relationship-cleanup';
 import { AuditService } from '../audit/audit.service';
 import { PrismaService } from '../database/prisma.service';
 import { EvidenceLifecycleService } from '../evidence/evidence-lifecycle.service';
@@ -164,6 +166,8 @@ export class ExtractionService {
     const rows = toRows(item, agentStepId, kept);
 
     await tx.extraction.deleteMany({ where: { evidenceId: item.id, caseId: item.caseId } });
+    await sweepOrphanEntities(tx, item.caseId);
+    await sweepOrphanRelationships(tx, item.caseId);
     if (rows.extractions.length > 0) {
       await tx.extraction.createMany({ data: rows.extractions });
       await tx.extractionSourceLine.createMany({ data: rows.links });
@@ -184,6 +188,8 @@ export class ExtractionService {
   /** EXTRACT failed: nothing is persisted from it; the item is FAILED and retryable (07 §22). */
   async saveFailed(tx: Prisma.TransactionClient, item: EvidenceItem): Promise<void> {
     await tx.extraction.deleteMany({ where: { evidenceId: item.id, caseId: item.caseId } });
+    await sweepOrphanEntities(tx, item.caseId);
+    await sweepOrphanRelationships(tx, item.caseId);
     await this.lifecycle.markFailed(tx, item.id, { code: 'EXTRACTION_FAILED', retryable: true });
     await this.audit.record(tx, {
       action: 'EVIDENCE_PROCESSING_FAILED',

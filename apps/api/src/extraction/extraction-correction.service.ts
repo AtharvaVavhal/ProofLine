@@ -6,6 +6,8 @@ import { CaseStateService } from '../cases/case-state.service';
 import { ApiError } from '../common/api-error';
 import { isUuid } from '../common/cursor';
 import { PrismaService } from '../database/prisma.service';
+import { sweepOrphanEntities } from '../entities/entity-cleanup';
+import { invalidateExtractionRelationships } from '../graph/relationship-cleanup';
 import { AnalysisRunsService, runSummary } from '../orchestrator/analysis-runs.service';
 import { ProvenanceService } from '../provenance/provenance.service';
 import { EXTRACTION_INCLUDE, presentExtraction } from './extraction.presenter';
@@ -67,6 +69,11 @@ export class ExtractionCorrectionService {
       }
       const normalized = normalize(extraction.fieldType, correctedValue);
       const correctedNormalizedValue = normalized.status === 'NORMALIZED' ? normalized.value : null;
+      const changed =
+        correctedNormalizedValue !==
+        (extraction.correctionStatus === 'USER_CORRECTED'
+          ? extraction.correctedNormalizedValue
+          : extraction.normalizedValue);
 
       const statementId = await this.provenance.recordStatement(tx, {
         caseId: owned.id,
@@ -87,11 +94,16 @@ export class ExtractionCorrectionService {
           correctedNormalizedValue,
           correctionStatementId: statementId,
           correctedAt: new Date(),
+          ...(changed ? { entityId: null } : {}),
         },
         include: EXTRACTION_INCLUDE,
       });
-      // Entities are recanonicalised by NORMALIZE in the CORRECTION run (06 §4.3); no entity
-      // exists before that step is built (Phase 7), so there is nothing to update here.
+      // Invalidate obsolete support immediately, even if queued re-resolution later fails.
+      // Original values, source lines and append-only correction statements remain intact.
+      if (changed) {
+        await invalidateExtractionRelationships(tx, owned.id, extraction.id, extraction.evidenceId);
+        await sweepOrphanEntities(tx, owned.id);
+      }
 
       await this.caseState.rewind(tx, {
         caseId: owned.id,

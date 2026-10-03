@@ -46,6 +46,28 @@ const OWNER_COLUMN = {
 /** Owns `user_statements` and `fact_sources` (04 §5.2). Statements are append-only. */
 @Injectable()
 export class ProvenanceService {
+  /** Reconcile the current support set without replacing surviving source rows (08 §9–§12). */
+  async replaceRelationshipSources(
+    db: Prisma.TransactionClient,
+    caseId: string,
+    relationshipId: string,
+    extractionIds: string[],
+  ) {
+    if (extractionIds.length === 0) throw new ProvenanceError('A relationship needs evidence');
+    await this.attachSources(db, {
+      caseId,
+      owner: { kind: 'relationship', id: relationshipId },
+      refs: extractionIds.map((extractionId) => ({ kind: 'EXTRACTION', extractionId })),
+    });
+    await db.factSource.deleteMany({
+      where: {
+        caseId,
+        relationshipId,
+        OR: [{ refKind: { not: 'EXTRACTION' } }, { extractionId: { notIn: extractionIds } }],
+      },
+    });
+  }
+
   /** Records a statement; a later statement on the same subject supersedes the earlier one. */
   async recordStatement(db: Prisma.TransactionClient, input: StatementInput): Promise<string> {
     const previous = await db.userStatement.findFirst({

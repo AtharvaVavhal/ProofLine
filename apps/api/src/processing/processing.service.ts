@@ -2,6 +2,8 @@ import { randomUUID } from 'node:crypto';
 import type { Readable } from 'node:stream';
 import { Inject, Injectable } from '@nestjs/common';
 import type { EvidenceItem, Prisma } from '@prisma/client';
+import { sweepOrphanEntities } from '../entities/entity-cleanup';
+import { sweepOrphanRelationships } from '../graph/relationship-cleanup';
 import { AuditService } from '../audit/audit.service';
 import { EvidenceLifecycleService } from '../evidence/evidence-lifecycle.service';
 import { LIMITS } from '../evidence/evidence-rules';
@@ -117,6 +119,8 @@ export class ProcessingService {
     parsed: ParsedEvidence,
   ): Promise<ParseOutcome & { kind: 'parsed' }> {
     await tx.parseResult.deleteMany({ where: { evidenceId: item.id } });
+    await sweepOrphanEntities(tx, item.caseId);
+    await sweepOrphanRelationships(tx, item.caseId);
     const parse = await this.createParseResult(tx, item, agentStepId, parsed, 'SUCCEEDED');
 
     const counters = new Map<number, number>();
@@ -176,6 +180,8 @@ export class ProcessingService {
     failure: ProcessingFailure,
   ): Promise<ParseOutcome & { kind: 'failed' }> {
     await tx.parseResult.deleteMany({ where: { evidenceId: item.id } });
+    await sweepOrphanEntities(tx, item.caseId);
+    await sweepOrphanRelationships(tx, item.caseId);
     if (failure.parse) {
       await this.createParseResult(
         tx,

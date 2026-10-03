@@ -1,4 +1,5 @@
 import { domainToASCII, domainToUnicode } from 'node:url';
+import { parse as parseDomain } from 'tldts';
 import type { EntityType, NormalizationStatus } from '@prisma/client';
 import { normalizeTemporal, parseTemporal } from './temporal';
 
@@ -7,15 +8,6 @@ import { normalizeTemporal, parseTemporal } from './temporal';
  * function of `raw_value` only: it never adds characters or digits that are not in the source
  * and never changes `raw_value` or the source lines.
  */
-
-/** Reserved test TLDs plus common public suffixes [IMPL: a curated list, not the full PSL]. */
-const TLDS = new Set(
-  (
-    'example test com org net edu gov mil int info biz name pro mobi app dev io co ai me tv cc ' +
-    'ws to ly gl in us uk ca au de fr nl eu ch it es se no fi dk pl ru cn jp kr sg hk ae pk bd ' +
-    'np lk br mx za ng ke xyz online site top shop store link live club click website tech cloud'
-  ).split(' '),
-);
 
 export const PHONE_PATTERN =
   /(?<![\w+])(?:(?:\+91|91)[ -]?|0)?[6-9]\d{4}[ -]?\d{5}(?!\d)|(?<![\w+])\+(?!91)\d{8,15}(?!\d)/g;
@@ -51,7 +43,11 @@ const TRACKING = /^(utm_.*|fbclid|gclid|dclid|msclkid|mc_cid|mc_eid|igshid|ref_s
 
 export const hasKnownTld = (host: string) => {
   const labels = host.toLowerCase().split('.');
-  return labels.length >= 2 && TLDS.has(labels[labels.length - 1]!);
+  const parsed = parseDomain(host);
+  return (
+    labels.length >= 2 &&
+    (['example', 'test'].includes(labels[labels.length - 1]!) || parsed.isIcann === true)
+  );
 };
 
 export type Normalized = {
@@ -70,19 +66,20 @@ const notNormalized: Normalized = { status: 'NOT_NORMALIZED', value: null };
 export function isValidFormat(type: EntityType, raw: string): boolean {
   switch (type) {
     case 'PHONE':
-      return anchored(PHONE_PATTERN).test(raw);
+      return /^(?:(?:\+91|91|0)?[6-9]\d{9}|\+\d{8,15})$/.test(raw.replace(/[\s\-().]/g, ''));
     case 'URL':
       return parseUrl(raw) !== null && stripUrlTail(raw) === raw;
     case 'DOMAIN':
       return (
-        /^(?:[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?\.)+[a-z]{2,24}$/i.test(raw) && hasKnownTld(raw)
+        /^(?:[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?\.)+[a-z0-9-]{2,63}$/i.test(domainToASCII(raw)) &&
+        hasKnownTld(raw)
       );
     case 'EMAIL':
       return anchored(EMAIL_PATTERN).test(raw);
     case 'UPI_ID':
-      return /^[A-Za-z0-9._-]{2,}@[A-Za-z][A-Za-z0-9]{1,}$/.test(raw);
+      return /^[A-Za-z0-9._-]{2,}@[A-Za-z][A-Za-z0-9]{1,}$/.test(trimUpi(raw));
     case 'TRANSACTION':
-      return /^[A-Za-z0-9]{8,22}$/.test(raw) && /\d/.test(raw);
+      return /^[A-Za-z0-9]{8,22}$/.test(raw.replace(/\s+/g, '')) && /\d/.test(raw);
     case 'AMOUNT':
       return anchored(AMOUNT_PATTERN).test(raw);
     case 'ACCOUNT_HINT':
@@ -94,14 +91,18 @@ export function isValidFormat(type: EntityType, raw: string): boolean {
     case 'PERSON':
     case 'BANK_OR_WALLET':
       // A name: letters (any script), spaces and . ' & -; no digits, at most 80 characters.
-      return /^[\p{L}][\p{L}\p{M} .'&-]{0,79}$/u.test(raw) && !/\s{2,}/.test(raw.trim());
+      return /^[\p{L}][\p{L}\p{M} .'&-]{0,79}$/u.test(raw.trim().replace(/\s+/g, ' '));
     case 'DATETIME':
       return parseTemporal(raw) !== null;
   }
 }
 
-/** 07 §15. Call only for values that passed `isValidFormat`. */
+const trimUpi = (raw: string) => raw.replace(/^[^\w]+|[^\w]+$/g, '');
+
+/** 07 §15. Invalid values stay unmerged even when called outside the extraction validator. */
 export function normalize(type: EntityType, raw: string): Normalized {
+  if (!isValidFormat(type, type === 'SMS_SENDER_HEADER' ? raw.toUpperCase() : raw))
+    return notNormalized;
   switch (type) {
     case 'PHONE': {
       const digits = raw.replace(/[\s\-().]/g, '');
@@ -134,7 +135,7 @@ export function normalize(type: EntityType, raw: string): Normalized {
       };
     }
     case 'UPI_ID':
-      return { status: 'NORMALIZED', value: raw.replace(/^[^\w]+|[^\w]+$/g, '').toLowerCase() };
+      return { status: 'NORMALIZED', value: trimUpi(raw).toLowerCase() };
     case 'EMAIL':
       return { status: 'NORMALIZED', value: raw.toLowerCase() };
     case 'TRANSACTION':
